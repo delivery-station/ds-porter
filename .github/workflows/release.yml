@@ -1,0 +1,142 @@
+name: Release Porter Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Build and Publish Porter Plugin
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io/${{ github.repository_owner }}/porter
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "Unable to determine version" >&2
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION_STRIPPED=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Delivery Station CLI with Porter plugin
+        uses: delivery-station/setup-ds-action@v1
+        with:
+          plugins: porter
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Authenticate to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Run tests
+        run: make test
+
+      - name: Build multi-platform artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          make release-build-all VERSION="$VERSION"
+          echo "Artifacts built under ./bin:"
+          find bin -maxdepth 3 -type f -name 'ds-porter*' -print
+
+      - name: Prepare release manifest
+        id: manifest
+        env:
+          VERSION_STRIPPED: ${{ steps.version.outputs.VERSION_STRIPPED }}
+        run: |
+          cp ds.manifest.yaml ds.manifest.release.yaml
+          if [ -n "$VERSION_STRIPPED" ]; then
+            perl -0pi -e 's/(^\s+version:\s*).*/$1'"$VERSION_STRIPPED"'/m' ds.manifest.release.yaml
+          fi
+
+      - name: Push artifacts to GHCR via DS
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          REGISTRY: ${{ env.REGISTRY }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ds porter push "$REGISTRY:$VERSION" --manifest ds.manifest.release.yaml
+
+      - name: Generate checksums
+        run: |
+          find bin -type f -name 'ds-porter*' -print0 | sort -z | xargs -0 sha256sum > bin/checksums.txt
+          cat bin/checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          generate_release_notes: true
+          files: |
+            bin/linux/amd64/ds-porter
+            bin/linux/arm64/ds-porter
+            bin/darwin/amd64/ds-porter
+            bin/darwin/arm64/ds-porter
+            bin/windows/amd64/ds-porter.exe
+            bin/windows/arm64/ds-porter.exe
+            bin/checksums.txt
+            ds.manifest.release.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          REGISTRY: ${{ env.REGISTRY }}
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          # 🚀 Porter Plugin Release
+
+          • Version: $VERSION
+          • Registry: $REGISTRY
+
+          ## Published Artifacts
+          - $REGISTRY:$VERSION (multi-arch index)
+          - Platform binaries uploaded as release assets
+
+          ## Commands
+          ```bash
+          # Pull current platform
+          ds porter pull $REGISTRY:$VERSION -o ./ds-porter
+
+          # Pull all platforms
+          ds porter pull $REGISTRY:$VERSION --all-arch -o ./artifacts
+          ```
+          EOF

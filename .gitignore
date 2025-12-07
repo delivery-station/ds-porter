@@ -1,0 +1,59 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+
+# Test coverage
+*.out
+coverage.html
+coverage.xml
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.backup
+
+# Configuration (local overrides)
+config.local.yaml
+.env
+.env.local
+.env.*.local
+
+# Cache
+.cache/
+/cache/
+
+# Plugin binaries (local development)
+plugins/
+
+# Build artifacts
+*.tar.gz
+*.zip
+checksums.txt
+
+
+docker-compose.yaml
+
+registry/

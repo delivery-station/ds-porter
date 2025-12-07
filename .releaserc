@@ -1,0 +1,61 @@
+{
+    "branches": [
+        {
+            "name": "main"
+        }
+    ],
+    "ci": true,
+    "dryRun": false,
+    "plugins": [
+        "@semantic-release/commit-analyzer",
+        "@semantic-release/release-notes-generator",
+        [
+            "@semantic-release/exec",
+            {   
+                "prepareCmd": "VERSION=${nextRelease.version} make release-prepare",
+                "publishCmd": "VERSION=${nextRelease.version} make release-build-all release-checksums"
+            }
+        ],
+        [
+            "@semantic-release/github",
+            {
+                "assets": [
+                    {
+                        "path": "bin/ds-linux-amd64.tar.gz",
+                        "label": "Linux AMD64"
+                    },
+                    {
+                        "path": "bin/ds-linux-arm64.tar.gz",
+                        "label": "Linux ARM64"
+                    },
+                    {
+                        "path": "bin/ds-linux-arm.tar.gz",
+                        "label": "Linux ARM"
+                    },
+                    {
+                        "path": "bin/ds-darwin-amd64.tar.gz",
+                        "label": "macOS Intel"
+                    },
+                    {
+                        "path": "bin/ds-darwin-arm64.tar.gz",
+                        "label": "macOS ARM64"
+                    },
+                    {
+                        "path": "bin/ds-windows-amd64.zip",
+                        "label": "Windows AMD64"
+                    },
+                    {
+                        "path": "bin/ds-windows-arm64.zip",
+                        "label": "Windows ARM64"
+                    },
+                    {
+                        "path": "bin/checksums.txt",
+                        "label": "SHA256 Checksums"
+                    }
+                ],
+                "successComment": false,
+                "addReleases": "top"
+            }
+        ]
+    ]
+}
