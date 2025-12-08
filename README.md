@@ -88,7 +88,14 @@ This call is primarily used by Delivery Station itself. It records the intent to
 
 ### `push`
 
-The command is wired for future parity but currently returns `PushArtifact not implemented with ORAS yet`.
+```
+ds porter push path/to/porter.manifest.yaml ghcr.io/delivery-station/porter:0.2.0
+```
+
+Pushes a plugin artifact to the target registry. Provide a manifest (see `examples/`) describing the
+binary, including optional `platform` metadata and annotations. Relative paths are resolved from the
+manifest directory. If a manifest is not provided, the command treats the first argument as a direct
+binary path for the current platform.
 
 ## Release Builds
 

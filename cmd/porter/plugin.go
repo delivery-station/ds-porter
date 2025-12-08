@@ -44,7 +44,12 @@ func (p *PorterPlugin) GetMetadata(ctx context.Context) (*types.PluginMetadata, 
 func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []string, env map[string]string) (*types.ExecutionResult, error) {
 	// Set env vars for the operation
 	for k, v := range env {
-		os.Setenv(k, v)
+		if err := os.Setenv(k, v); err != nil {
+			return &types.ExecutionResult{
+				ExitCode: 1,
+				Error:    fmt.Sprintf("failed to set environment variable %s: %v", k, err),
+			}, nil
+		}
 	}
 
 	// Let's create a client
@@ -63,7 +68,11 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 			Error:    fmt.Sprintf("Failed to create porter client: %v", err),
 		}, nil
 	}
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			p.logger.Warn("Failed to close porter client", "error", err)
+		}
+	}()
 
 	// Capture stdout
 	var stdoutBuf bytes.Buffer

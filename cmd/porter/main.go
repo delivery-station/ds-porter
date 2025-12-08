@@ -11,6 +11,7 @@ import (
 
 	"github.com/delivery-station/porter/pkg/porter"
 	"github.com/delivery-station/porter/pkg/release"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -57,9 +58,12 @@ func main() {
 	}
 	// Check for special flags
 	if os.Args[1] == "--version" {
-		fmt.Printf("porter version %s\n", version)
-		fmt.Printf("  commit: %s\n", commit)
-		fmt.Printf("  built:  %s\n", date)
+		lines := []string{
+			fmt.Sprintf("porter version %s", version),
+			fmt.Sprintf("  commit: %s", commit),
+			fmt.Sprintf("  built:  %s", date),
+		}
+		writeLines(os.Stdout, lines)
 		return
 	}
 
@@ -90,7 +94,11 @@ func main() {
 		logger.Error("Failed to create porter client", "error", err)
 		os.Exit(1)
 	}
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			logger.Warn("Failed to close porter client", "error", err)
+		}
+	}()
 
 	operation := os.Args[1]
 	args := os.Args[2:]
@@ -198,8 +206,13 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 	}
 
 	// Output result as JSON for DS to parse
-	jsonOutput, _ := json.Marshal(result)
-	fmt.Fprintln(stdout, string(jsonOutput))
+	jsonOutput, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("failed to marshal result: %w", err)
+	}
+	if _, err := fmt.Fprintln(stdout, string(jsonOutput)); err != nil {
+		return fmt.Errorf("failed to write result: %w", err)
+	}
 	return nil
 }
 
@@ -263,23 +276,26 @@ func isHelpFlag(arg string) bool {
 }
 
 func printPullUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: ds porter pull [flags] <artifact-ref>")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --output, -o <path>   Export artifact to a file or directory")
-	fmt.Fprintln(w, "                         Directories receive ds-porter by default; files write the binary directly")
-	fmt.Fprintln(w, "  --platform <os/arch>  Fetch a specific platform (repeatable; e.g. linux/arm64)")
-	fmt.Fprintln(w, "  --all-arch            Fetch every platform in the index (requires directory output)")
-	fmt.Fprintln(w, "  --insecure            Allow plain HTTP connections to registries")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Behaviour:")
-	fmt.Fprintln(w, "  • Without --platform/--all-arch, the current runtime platform is exported")
-	fmt.Fprintln(w, "  • When multiple platforms are requested, artifacts are written to <dir>/<os>/<arch>/")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  ds porter pull ghcr.io/delivery-station/porter:0.2.0 -o ./porter-bin")
-	fmt.Fprintln(w, "  ds porter pull localhost/delivery-station/porter:0.2.0 --platform linux/arm64 -o ./out")
-	fmt.Fprintln(w, "  ds porter pull ghcr.io/...:0.2.0 --all-arch -o ./artifacts")
+	lines := []string{
+		"Usage: ds porter pull [flags] <artifact-ref>",
+		"",
+		"Flags:",
+		"  --output, -o <path>   Export artifact to a file or directory",
+		"                         Directories receive ds-porter by default; files write the binary directly",
+		"  --platform <os/arch>  Fetch a specific platform (repeatable; e.g. linux/arm64)",
+		"  --all-arch            Fetch every platform in the index (requires directory output)",
+		"  --insecure            Allow plain HTTP connections to registries",
+		"",
+		"Behaviour:",
+		"  • Without --platform/--all-arch, the current runtime platform is exported",
+		"  • When multiple platforms are requested, artifacts are written to <dir>/<os>/<arch>/",
+		"",
+		"Examples:",
+		"  ds porter pull ghcr.io/delivery-station/porter:0.2.0 -o ./porter-bin",
+		"  ds porter pull localhost/delivery-station/porter:0.2.0 --platform linux/arm64 -o ./out",
+		"  ds porter pull ghcr.io/...:0.2.0 --all-arch -o ./artifacts",
+	}
+	writeLines(w, lines)
 }
 
 func handlePush(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
@@ -311,7 +327,7 @@ func handlePush(client *porter.Client, args []string, logger hclog.Logger, stdou
 			return fmt.Errorf("registry reference required")
 		}
 		ref = positionalArgs[0]
-		return handleMultiArchPush(ref, manifestPath, logger, stdout, insecure)
+		return handleMultiArchPush(client, ref, manifestPath, logger, stdout, insecure)
 	}
 
 	// Single artifact push
@@ -326,23 +342,36 @@ func handlePush(client *porter.Client, args []string, logger hclog.Logger, stdou
 		return err
 	}
 
-	output, _ := json.Marshal(result)
-	fmt.Fprintln(stdout, string(output))
+	output, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("failed to marshal push result: %w", err)
+	}
+	if _, err := fmt.Fprintln(stdout, string(output)); err != nil {
+		return fmt.Errorf("failed to write push result: %w", err)
+	}
 	return nil
 }
 
-func handleMultiArchPush(ref, manifestPath string, logger hclog.Logger, stdout io.Writer, insecure bool) error {
+func writeLines(w io.Writer, lines []string) {
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			_, _ = fmt.Fprintf(w, "error writing output: %v\n", err)
+			return
+		}
+	}
+}
+func handleMultiArchPush(client *porter.Client, ref, manifestPath string, logger hclog.Logger, stdout io.Writer, insecure bool) error {
 	// Parse registry and repository from ref
 	// ref format: registry/repo[:tag]
 	// We need to split this for ReleaseConfig
 	// Actually, let's just pass the full ref and let the pusher handle it
 
-	// Get credentials from env
-	username := os.Getenv("REGISTRY_USERNAME")
-	password := os.Getenv("REGISTRY_PASSWORD")
-	if password == "" {
-		password = os.Getenv("GITHUB_TOKEN")
+	parsedRef, err := name.ParseReference(ref)
+	if err != nil {
+		return fmt.Errorf("invalid reference %q: %w", ref, err)
 	}
+
+	username, password := client.ResolveCredentials(parsedRef.Context().RegistryStr())
 
 	// Config
 	config := release.ReleaseConfig{
@@ -368,8 +397,13 @@ func handleList(client *porter.Client, args []string, logger hclog.Logger, stdou
 		return err
 	}
 
-	output, _ := json.Marshal(artifacts)
-	fmt.Fprintln(stdout, string(output))
+	output, err := json.Marshal(artifacts)
+	if err != nil {
+		return fmt.Errorf("failed to marshal artifact list: %w", err)
+	}
+	if _, err := fmt.Fprintln(stdout, string(output)); err != nil {
+		return fmt.Errorf("failed to write artifact list: %w", err)
+	}
 	return nil
 }
 
@@ -460,29 +494,32 @@ func handleRelease(args []string, logger hclog.Logger) error {
 */
 
 func printUsage() {
-	fmt.Println("Porter - OCI Artifact Management Plugin for DS")
-	fmt.Println()
-	fmt.Println("Usage: ds-porter <operation> [args]")
-	fmt.Println()
-	fmt.Println("Operations:")
-	fmt.Println("  pull <ref>              Pull artifact from OCI registry")
-	fmt.Println("  push <path> <ref>       Push artifact to OCI registry")
-	fmt.Println("  list                    List cached artifacts")
-	fmt.Println("  execute-plugin <id> <plugin> [args...]")
-	fmt.Println("                         Execute plugin on artifact")
-	fmt.Println()
-	fmt.Println("Pull flags:")
-	fmt.Println("  --output, -o <path>     Export artifact to file or directory")
-	fmt.Println("  --platform <os/arch>    Fetch specific platform (repeatable)")
-	fmt.Println("  --all-arch              Fetch every platform in the index")
-	fmt.Println("  --insecure              Allow plain HTTP registry access")
-	fmt.Println()
-	fmt.Println("Multi-arch Push:")
-	fmt.Println("  ds-porter push <registry-ref> --manifest=<path>")
-	fmt.Println()
-	fmt.Println("Special flags:")
-	fmt.Println("  --version               Print version")
-	fmt.Println("  --manifest              Print plugin manifest")
+	lines := []string{
+		"Porter - OCI Artifact Management Plugin for DS",
+		"",
+		"Usage: ds-porter <operation> [args]",
+		"",
+		"Operations:",
+		"  pull <ref>              Pull artifact from OCI registry",
+		"  push <path> <ref>       Push artifact to OCI registry",
+		"  list                    List cached artifacts",
+		"  execute-plugin <id> <plugin> [args...]",
+		"                         Execute plugin on artifact",
+		"",
+		"Pull flags:",
+		"  --output, -o <path>     Export artifact to file or directory",
+		"  --platform <os/arch>    Fetch specific platform (repeatable)",
+		"  --all-arch              Fetch every platform in the index",
+		"  --insecure              Allow plain HTTP registry access",
+		"",
+		"Multi-arch Push:",
+		"  ds-porter push <registry-ref> --manifest=<path>",
+		"",
+		"Special flags:",
+		"  --version               Print version",
+		"  --manifest              Print plugin manifest",
+	}
+	writeLines(os.Stdout, lines)
 }
 
 func printManifest() {
@@ -501,6 +538,10 @@ func printManifest() {
 		},
 	}
 
-	output, _ := json.MarshalIndent(manifest, "", "  ")
-	fmt.Println(string(output))
+	output, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "failed to marshal manifest: %v\n", err)
+		return
+	}
+	writeLines(os.Stdout, []string{string(output)})
 }

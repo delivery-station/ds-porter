@@ -38,8 +38,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("DS_PORTER_CONFIG", tt.envValue)
-			defer os.Unsetenv("DS_PORTER_CONFIG")
+			t.Setenv("DS_PORTER_CONFIG", tt.envValue)
 
 			cfg, err := LoadConfigFromEnv()
 			if tt.wantErr {

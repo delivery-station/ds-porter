@@ -134,13 +134,32 @@ func NewPusher(config ReleaseConfig) (*Pusher, error) {
 	}, nil
 }
 
+func writeProgressLine(progress io.Writer, format string, args ...interface{}) error {
+	if progress == nil {
+		return nil
+	}
+	if !strings.HasSuffix(format, "\n") {
+		format += "\n"
+	}
+	if _, err := fmt.Fprintf(progress, format, args...); err != nil {
+		return fmt.Errorf("failed to write progress output: %w", err)
+	}
+	return nil
+}
+
 // Push performs the multi-arch push
 func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
-	fmt.Fprintln(progress, "=== Porter Plugin Multi-Arch Push ===")
-	fmt.Fprintln(progress, "")
+	if err := writeProgressLine(progress, "=== Porter Plugin Multi-Arch Push ==="); err != nil {
+		return err
+	}
+	if err := writeProgressLine(progress, ""); err != nil {
+		return err
+	}
 
 	// Load manifest
-	fmt.Fprintf(progress, "Loading manifest from %s...\n", p.config.ManifestPath)
+	if err := writeProgressLine(progress, "Loading manifest from %s...", p.config.ManifestPath); err != nil {
+		return err
+	}
 	manifest, err := LoadManifest(p.config.ManifestPath)
 	if err != nil {
 		return fmt.Errorf("failed to load manifest: %w", err)
@@ -161,21 +180,29 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 		entries[platform] = entry
 	}
 
-	fmt.Fprintln(progress, "Pushing artifacts to OCI registry...")
+	if err := writeProgressLine(progress, "Pushing artifacts to OCI registry..."); err != nil {
+		return err
+	}
 	descriptors, err := p.PushAll(ctx, entries, progress)
 	if err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 
 	// Push Index
-	fmt.Fprintln(progress, "Pushing manifest index...")
+	if err := writeProgressLine(progress, "Pushing manifest index..."); err != nil {
+		return err
+	}
 	ref, err := p.PushIndex(ctx, descriptors, manifest)
 	if err != nil {
 		return fmt.Errorf("push index failed: %w", err)
 	}
 
-	fmt.Fprintln(progress, "")
-	fmt.Fprintf(progress, "✓ Pushed to %s\n", ref)
+	if err := writeProgressLine(progress, ""); err != nil {
+		return err
+	}
+	if err := writeProgressLine(progress, "✓ Pushed to %s", ref); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -186,7 +213,9 @@ func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry
 
 	// Push each platform binary
 	for platform, entry := range entries {
-		fmt.Fprintf(progress, "Pushing %s/%s...\n", platform.OS, platform.Arch)
+		if err := writeProgressLine(progress, "Pushing %s/%s...", platform.OS, platform.Arch); err != nil {
+			return nil, err
+		}
 
 		desc, err := p.PushBinary(ctx, platform, entry)
 		if err != nil {
@@ -194,10 +223,14 @@ func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry
 		}
 
 		descriptors[platform] = desc
-		fmt.Fprintf(progress, "✓ Pushed %s → %s\n", platform.FormatString(), desc.Digest)
+		if err := writeProgressLine(progress, "✓ Pushed %s → %s", platform.FormatString(), desc.Digest); err != nil {
+			return nil, err
+		}
 	}
 
-	fmt.Fprintln(progress, "✓ All platform binaries pushed successfully")
+	if err := writeProgressLine(progress, "✓ All platform binaries pushed successfully"); err != nil {
+		return nil, err
+	}
 	return descriptors, nil
 }
 
@@ -475,7 +508,9 @@ func (s *FileStore) AddFile(path string, mediaType string) (ocispec.Descriptor, 
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	stat, err := f.Stat()
 	if err != nil {

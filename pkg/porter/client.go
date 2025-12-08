@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/delivery-station/porter/pkg/release"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
@@ -157,9 +158,6 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 					Username: r.Username,
 					Password: r.Password,
 				})
-			} else if r.Token != "" {
-				// Bearer token support might need custom credential helper or header injection
-				// For now, basic auth is primary
 			}
 		}
 	}
@@ -203,7 +201,9 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 		// Check if target exists
 		if _, err := os.Stat(finalCachePath); err == nil {
 			// Already exists, remove temp
-			os.RemoveAll(cachePath)
+			if removeErr := os.RemoveAll(cachePath); removeErr != nil {
+				c.logger.Warn("Failed to remove temporary cache path", "path", cachePath, "error", removeErr)
+			}
 		} else {
 			// Rename
 			if err := os.Rename(cachePath, finalCachePath); err != nil {
@@ -274,10 +274,278 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 
 // PushArtifact pushes an artifact to an OCI registry
 func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*ArtifactResult, error) {
-	// TODO: Rewrite PushArtifact to use ORAS as well
-	// For now, we'll just return an error since we removed the go-containerregistry imports
-	// and the user is focused on Pull/Export
-	return nil, fmt.Errorf("PushArtifact not implemented with ORAS yet")
+	if ref == "" {
+		return nil, fmt.Errorf("artifact reference required")
+	}
+
+	if artifactPath == "" {
+		return nil, fmt.Errorf("manifest or artifact path required")
+	}
+
+	absPath, err := filepath.Abs(artifactPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve artifact path %s: %w", artifactPath, err)
+	}
+
+	manifest, manifestDir, err := loadPushManifest(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(manifest.Manifests) == 0 {
+		return nil, fmt.Errorf("manifest must contain at least one entry")
+	}
+
+	entries := make(map[release.Platform]release.ManifestEntry, len(manifest.Manifests))
+	for _, entry := range manifest.Manifests {
+		prepared, platform, prepErr := prepareManifestEntry(entry, manifestDir)
+		if prepErr != nil {
+			return nil, prepErr
+		}
+		entries[platform] = prepared
+	}
+
+	ctx := context.Background()
+
+	opts := []name.Option{}
+	if insecure {
+		opts = append(opts, name.Insecure)
+	}
+	parsedRef, err := name.ParseReference(ref, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("invalid reference %q: %w", ref, err)
+	}
+
+	username, password := c.resolveCredentials(parsedRef.Context().RegistryStr())
+	releaseConfig := release.ReleaseConfig{
+		Reference:    ref,
+		Username:     username,
+		Password:     password,
+		ManifestPath: absPath,
+		TagLatest:    true,
+		Insecure:     insecure,
+	}
+
+	pusher, err := release.NewPusher(releaseConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pusher: %w", err)
+	}
+
+	descriptors, err := pusher.PushAll(ctx, entries, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("failed to push artifact content: %w", err)
+	}
+
+	refWithTag, err := pusher.PushIndex(ctx, descriptors, manifest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to push manifest index: %w", err)
+	}
+
+	repoName, tag := splitReference(ref)
+	repo, err := remote.NewRepository(repoName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create repository: %w", err)
+	}
+	repo.Client = newAuthClient(parsedRef.Context().RegistryStr(), username, password)
+	repo.PlainHTTP = insecure
+
+	desc, err := repo.Resolve(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve pushed artifact: %w", err)
+	}
+
+	artifactID := desc.Digest.Encoded()
+	if len(artifactID) > 16 {
+		artifactID = artifactID[:16]
+	}
+
+	metadata := map[string]string{}
+	for k, v := range manifest.Annotations {
+		metadata[k] = v
+	}
+	if manifest.ArtifactType != "" {
+		metadata["artifact.type"] = manifest.ArtifactType
+	}
+	metadata["pushed.reference"] = refWithTag
+	if refWithTag != ref {
+		metadata["requested.reference"] = ref
+	}
+
+	c.logger.Info("Artifact pushed successfully", "reference", ref, "digest", desc.Digest.String())
+
+	return &ArtifactResult{
+		ID:        artifactID,
+		Reference: refWithTag,
+		Digest:    desc.Digest.String(),
+		Size:      desc.Size,
+		Metadata:  metadata,
+		Cached:    false,
+	}, nil
+}
+
+func loadPushManifest(path string) (*release.Manifest, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to access %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return nil, "", fmt.Errorf("manifest path %s is a directory", path)
+	}
+
+	manifest, err := release.LoadManifest(path)
+	if err == nil {
+		if manifest.Annotations == nil {
+			manifest.Annotations = map[string]string{}
+		}
+		return manifest, filepath.Dir(path), nil
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		return nil, "", fmt.Errorf("failed to parse manifest %s: %w", path, err)
+	}
+
+	defaultPlatform := release.GetCurrentPlatform()
+	return &release.Manifest{
+		ArtifactType: "application/vnd.delivery-station.plugin.index.v1+json",
+		Annotations:  map[string]string{},
+		Manifests: []release.ManifestEntry{{
+			Platform:  defaultPlatform.FormatString(),
+			Path:      path,
+			MediaType: "application/vnd.delivery-station.plugin.v1+binary",
+		}},
+	}, filepath.Dir(path), nil
+}
+
+func prepareManifestEntry(entry release.ManifestEntry, baseDir string) (release.ManifestEntry, release.Platform, error) {
+	if strings.TrimSpace(entry.Path) == "" {
+		return release.ManifestEntry{}, release.Platform{}, fmt.Errorf("manifest entry missing path")
+	}
+
+	resolvedPath := entry.Path
+	if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(baseDir, resolvedPath)
+	}
+	resolvedPath = filepath.Clean(resolvedPath)
+
+	if _, err := os.Stat(resolvedPath); err != nil {
+		return release.ManifestEntry{}, release.Platform{}, fmt.Errorf("manifest entry path %s: %w", resolvedPath, err)
+	}
+
+	platform, err := parseManifestPlatform(entry.Platform)
+	if err != nil {
+		return release.ManifestEntry{}, release.Platform{}, err
+	}
+
+	entry.Path = resolvedPath
+	return entry, platform, nil
+}
+
+func parseManifestPlatform(value string) (release.Platform, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return release.Platform{OS: "noarch"}, nil
+	}
+
+	platform, err := release.ParsePlatform(trimmed)
+	if err != nil {
+		return release.Platform{}, fmt.Errorf("invalid platform %q: %w", value, err)
+	}
+	if strings.TrimSpace(platform.OS) == "" {
+		platform.OS = "noarch"
+	}
+	return platform, nil
+}
+
+func splitReference(ref string) (string, string) {
+	base := ref
+	if !strings.Contains(base, ":") {
+		base += ":latest"
+	}
+
+	idx := strings.LastIndex(base, ":")
+	if idx == -1 {
+		return base, "latest"
+	}
+
+	repo := base[:idx]
+	tag := base[idx+1:]
+	return repo, tag
+}
+
+func newAuthClient(registry, username, password string) *auth.Client {
+	client := &auth.Client{
+		Client: retry.DefaultClient,
+		Cache:  auth.DefaultCache,
+	}
+
+	if username != "" || password != "" {
+		client.Credential = auth.StaticCredential(normalizeRegistry(registry), auth.Credential{
+			Username: username,
+			Password: password,
+		})
+	}
+
+	return client
+}
+
+func (c *Client) resolveCredentials(registry string) (string, string) {
+	normalized := normalizeRegistry(registry)
+	for _, reg := range c.config.Registries {
+		candidateURL := normalizeRegistry(reg.URL)
+		candidateName := normalizeRegistry(reg.Name)
+		if normalized != "" && normalized != candidateURL && normalized != candidateName {
+			continue
+		}
+
+		username := reg.Username
+		password := reg.Password
+		if password == "" && reg.Token != "" {
+			password = reg.Token
+		}
+		if username == "" && password != "" {
+			username = defaultUsername()
+		}
+		return username, password
+	}
+
+	username := os.Getenv("REGISTRY_USERNAME")
+	password := os.Getenv("REGISTRY_PASSWORD")
+	if password == "" {
+		password = os.Getenv("GITHUB_TOKEN")
+	}
+	if username == "" && password != "" {
+		username = defaultUsername()
+	}
+	return username, password
+}
+
+// ResolveCredentials exposes the resolved credentials for a registry.
+func (c *Client) ResolveCredentials(registry string) (string, string) {
+	return c.resolveCredentials(registry)
+}
+func normalizeRegistry(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "https://")
+	trimmed = strings.TrimPrefix(trimmed, "http://")
+	trimmed = strings.TrimSuffix(trimmed, "/")
+	return trimmed
+}
+
+func defaultUsername() string {
+	if v := os.Getenv("REGISTRY_USER"); v != "" {
+		return v
+	}
+	if v := os.Getenv("REGISTRY_USERNAME"); v != "" {
+		return v
+	}
+	if v := os.Getenv("GITHUB_USER"); v != "" {
+		return v
+	}
+	return "token"
 }
 
 // ListCachedArtifacts lists all cached artifacts
@@ -412,7 +680,6 @@ func (c *Client) ExportArtifact(result *ArtifactResult, destination string, opts
 			if err := os.MkdirAll(destination, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create destination directory: %w", err)
 			}
-			destIsDir = true
 		} else if looksFile {
 			parent := filepath.Dir(destination)
 			if parent != "" && parent != "." {
@@ -425,7 +692,6 @@ func (c *Client) ExportArtifact(result *ArtifactResult, destination string, opts
 			if err := os.MkdirAll(destination, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create destination directory: %w", err)
 			}
-			destIsDir = true
 		}
 	}
 
@@ -505,22 +771,6 @@ func (c *Client) selectManifests(ctx context.Context, store *oci.Store, root oci
 	return []manifestSelection{{Descriptor: root, Platform: root.Platform}}, nil
 }
 
-func (c *Client) destinationRequiresDirectory(manifests []manifestSelection, opts ExportOptions) bool {
-	if opts.AllPlatforms {
-		return true
-	}
-	if len(manifests) > 1 {
-		return true
-	}
-	if len(manifests) == 1 {
-		platform := manifests[0].Platform
-		if platform != nil && (platform.OS != "" || platform.Architecture != "") {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Client) exportManifestToFile(ctx context.Context, store *oci.Store, manifestDesc ocispec.Descriptor, destination string) ([]string, error) {
 	manifestBytes, err := content.FetchAll(ctx, store, manifestDesc)
 	if err != nil {
@@ -540,7 +790,9 @@ func (c *Client) exportManifestToFile(ctx context.Context, store *oci.Store, man
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch layer: %w", err)
 	}
-	defer layerReader.Close()
+	defer func() {
+		_ = layerReader.Close()
+	}()
 
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create destination path: %w", err)
@@ -550,7 +802,9 @@ func (c *Client) exportManifestToFile(ctx context.Context, store *oci.Store, man
 	if err != nil {
 		return nil, fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		_ = outFile.Close()
+	}()
 
 	if _, err := io.Copy(outFile, layerReader); err != nil {
 		return nil, fmt.Errorf("failed to copy layer: %w", err)
@@ -581,24 +835,30 @@ func (c *Client) exportManifestLayers(ctx context.Context, store *oci.Store, man
 		}
 
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			layerReader.Close()
+			_ = layerReader.Close()
 			return nil, fmt.Errorf("failed to create destination directory: %w", err)
 		}
 
 		outFile, err := os.Create(destPath)
 		if err != nil {
-			layerReader.Close()
+			_ = layerReader.Close()
 			return nil, fmt.Errorf("failed to create file: %w", err)
 		}
 
 		if _, err := io.Copy(outFile, layerReader); err != nil {
-			outFile.Close()
-			layerReader.Close()
+			_ = outFile.Close()
+			_ = layerReader.Close()
 			return nil, fmt.Errorf("failed to copy layer: %w", err)
 		}
 
-		outFile.Close()
-		layerReader.Close()
+		if err := outFile.Close(); err != nil {
+			_ = layerReader.Close()
+			return nil, fmt.Errorf("failed to close file: %w", err)
+		}
+
+		if err := layerReader.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close layer reader: %w", err)
+		}
 
 		exported = append(exported, destPath)
 		c.logger.Info("Exported layer", "digest", layer.Digest, "path", destPath)

@@ -30,7 +30,9 @@ func TestPorterAdapter(t *testing.T) {
 	adapter, err := NewPorterAdapter(cfg, nil)
 	require.NoError(t, err)
 	require.NotNil(t, adapter)
-	defer adapter.Close()
+	defer func() {
+		_ = adapter.Close()
+	}()
 
 	t.Run("StoreAndRetrieveInstallationState", func(t *testing.T) {
 		ctx := context.Background()
@@ -88,7 +90,9 @@ func TestPorterAdapterClient(t *testing.T) {
 
 	adapter, err := NewPorterAdapter(cfg, nil)
 	require.NoError(t, err)
-	defer adapter.Close()
+	defer func() {
+		_ = adapter.Close()
+	}()
 
 	client := adapter.Client()
 	assert.NotNil(t, client)
