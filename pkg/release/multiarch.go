@@ -103,6 +103,12 @@ type ReleaseConfig struct {
 	Insecure     bool
 }
 
+// Release orchestrates building and publishing multi-arch artifacts.
+type Release struct {
+	buildConfig BuildConfig
+	publisher   *Pusher
+}
+
 // Pusher handles pushing artifacts to OCI registry
 type Pusher struct {
 	config ReleaseConfig
@@ -391,12 +397,6 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec
 	return baseRef, nil
 }
 
-// Release orchestrates the complete build and release process
-// Deprecated: Use Pusher instead
-type Release struct {
-	publisher *Pusher
-}
-
 // NewRelease creates a new Release orchestrator
 func NewRelease(buildConfig BuildConfig, releaseConfig ReleaseConfig) (*Release, error) {
 	publisher, err := NewPusher(releaseConfig)
@@ -405,7 +405,8 @@ func NewRelease(buildConfig BuildConfig, releaseConfig ReleaseConfig) (*Release,
 	}
 
 	return &Release{
-		publisher: publisher,
+		buildConfig: buildConfig,
+		publisher:   publisher,
 	}, nil
 }
 

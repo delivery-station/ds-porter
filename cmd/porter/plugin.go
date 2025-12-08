@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/delivery-station/ds/pkg/types"
 	"github.com/delivery-station/porter/pkg/porter"
@@ -52,13 +53,22 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 		}
 	}
 
-	// Let's create a client
-	config, err := porter.LoadConfigFromEnv() // This reads os.Environ()
+	// Load configuration supplied by DS host
+	config, err := porter.LoadConfigFromHost(ctx)
 	if err != nil {
+		p.logger.Error("Failed to load configuration from DS", "error", err)
 		return &types.ExecutionResult{
 			ExitCode: 1,
-			Error:    fmt.Sprintf("Failed to load configuration: %v", err),
+			Error:    fmt.Sprintf("failed to load configuration from DS: %v", err),
 		}, nil
+	}
+
+	if level := strings.TrimSpace(config.LogLevel); level != "" {
+		if parsed := hclog.LevelFromString(level); parsed != hclog.NoLevel {
+			p.logger.SetLevel(parsed)
+		} else {
+			p.logger.Warn("Received unknown log level from DS", "level", level)
+		}
 	}
 
 	client, err := porter.NewClient(config, p.logger)

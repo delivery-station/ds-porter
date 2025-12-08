@@ -5,14 +5,39 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/delivery-station/ds/pkg/types"
 	"github.com/hashicorp/go-hclog"
 )
+
+type stubHostConfigProvider struct {
+	cfg *types.Config
+	err error
+}
+
+func (s *stubHostConfigProvider) GetEffectiveConfig(ctx context.Context) (*types.Config, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.cfg, nil
+}
+
+func newHostConfigContext(t *testing.T) context.Context {
+	t.Helper()
+	provider := &stubHostConfigProvider{
+		cfg: &types.Config{
+			Cache:    types.CacheConfig{Dir: t.TempDir()},
+			Registry: types.RegistryConfig{Default: "ghcr.io/delivery-station"},
+			Logging:  types.LoggingConfig{Level: "debug"},
+		},
+	}
+	return types.WithHostConfigProvider(context.Background(), provider)
+}
 
 func TestPorterPlugin_Execute_Help(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Debug})
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
-	ctx := context.Background()
+	ctx := newHostConfigContext(t)
 	env := make(map[string]string)
 
 	result, err := plugin.Execute(ctx, "help", []string{}, env)
@@ -28,13 +53,17 @@ func TestPorterPlugin_Execute_Help(t *testing.T) {
 	if !strings.Contains(result.Stdout, expectedOutput) {
 		t.Errorf("expected output to contain %q, got %q", expectedOutput, result.Stdout)
 	}
+
+	if plugin.logger.GetLevel() != hclog.Debug {
+		t.Fatalf("expected logger level debug, got %s", plugin.logger.GetLevel())
+	}
 }
 
 func TestPorterPlugin_Execute_Unknown(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Debug})
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
-	ctx := context.Background()
+	ctx := newHostConfigContext(t)
 	env := make(map[string]string)
 
 	result, err := plugin.Execute(ctx, "unknown", []string{}, env)
@@ -50,13 +79,17 @@ func TestPorterPlugin_Execute_Unknown(t *testing.T) {
 	if result.Error != expectedError {
 		t.Errorf("expected error %q, got %q", expectedError, result.Error)
 	}
+
+	if plugin.logger.GetLevel() != hclog.Debug {
+		t.Fatalf("expected logger level debug, got %s", plugin.logger.GetLevel())
+	}
 }
 
 func TestPorterPlugin_Execute_Version(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Debug})
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
-	ctx := context.Background()
+	ctx := newHostConfigContext(t)
 	env := make(map[string]string)
 
 	result, err := plugin.Execute(ctx, "version", []string{}, env)
@@ -71,5 +104,9 @@ func TestPorterPlugin_Execute_Version(t *testing.T) {
 	expectedOutput := "porter version 0.1.0\n  commit: test-commit\n  built:  test-date"
 	if !strings.Contains(result.Stdout, expectedOutput) {
 		t.Errorf("expected output to contain %q, got %q", expectedOutput, result.Stdout)
+	}
+
+	if plugin.logger.GetLevel() != hclog.Debug {
+		t.Fatalf("expected logger level debug, got %s", plugin.logger.GetLevel())
 	}
 }

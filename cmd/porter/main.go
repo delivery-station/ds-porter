@@ -31,6 +31,22 @@ var (
 // It receives commands via: ds porter <operation> [args]
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-version", "--version":
+			lines := []string{
+				fmt.Sprintf("porter version %s", version),
+				fmt.Sprintf("  commit: %s", commit),
+				fmt.Sprintf("  built:  %s", date),
+			}
+			writeLines(os.Stdout, lines)
+			return
+		case "-help", "--help", "help":
+			fmt.Fprintln(os.Stderr, "porter is a Delivery Station plugin and must be launched by DS.")
+			os.Exit(1)
+		}
+	}
+
 	logger := hclog.New(&hclog.LoggerOptions{
 		Name:       "porter",
 		Output:     os.Stderr,
@@ -38,90 +54,15 @@ func main() {
 		JSONFormat: true,
 	})
 
-	// Check if we are running in plugin mode (no args)
-	if len(os.Args) == 1 {
-		porterPlugin := NewPorterPlugin(logger, version, commit, date)
+	porterPlugin := NewPorterPlugin(logger, version, commit, date)
 
-		plugin.Serve(&plugin.ServeConfig{
-			HandshakeConfig: pkgplugin.Handshake,
-			Plugins: map[string]plugin.Plugin{
-				"ds-plugin": &pkgplugin.DSPlugin{Impl: porterPlugin},
-			},
-			GRPCServer: plugin.DefaultGRPCServer,
-		})
-		return
-	}
-
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-	// Check for special flags
-	if os.Args[1] == "--version" {
-		lines := []string{
-			fmt.Sprintf("porter version %s", version),
-			fmt.Sprintf("  commit: %s", commit),
-			fmt.Sprintf("  built:  %s", date),
-		}
-		writeLines(os.Stdout, lines)
-		return
-	}
-
-	if os.Args[1] == "--manifest" {
-		printManifest()
-		return
-	}
-
-	if os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help" {
-		printUsage()
-		return
-	}
-
-	if os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help" {
-		printUsage()
-		return
-	}
-
-	// Parse DS plugin config from environment
-	config, err := porter.LoadConfigFromEnv()
-	if err != nil {
-		logger.Error("Failed to load configuration", "error", err)
-		os.Exit(1)
-	}
-
-	client, err := porter.NewClient(config, logger)
-	if err != nil {
-		logger.Error("Failed to create porter client", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := client.Close(); err != nil {
-			logger.Warn("Failed to close porter client", "error", err)
-		}
-	}()
-
-	operation := os.Args[1]
-	args := os.Args[2:]
-
-	if err := executeOperation(client, operation, args, logger, os.Stdout); err != nil {
-		logger.Error("Operation failed", "operation", operation, "error", err)
-		os.Exit(1)
-	}
-}
-
-func executeOperation(client *porter.Client, operation string, args []string, logger hclog.Logger, stdout io.Writer) error {
-	switch operation {
-	case "pull":
-		return handlePull(client, args, logger, stdout)
-	case "push":
-		return handlePush(client, args, logger, stdout)
-	case "list":
-		return handleList(client, args, logger, stdout)
-	case "execute-plugin":
-		return handleExecutePlugin(client, args, logger, stdout)
-	default:
-		return fmt.Errorf("unknown operation: %s", operation)
-	}
+	plugin.Serve(&plugin.ServeConfig{
+		HandshakeConfig: pkgplugin.Handshake,
+		Plugins: map[string]plugin.Plugin{
+			"ds-plugin": &pkgplugin.DSPlugin{Impl: porterPlugin},
+		},
+		GRPCServer: plugin.DefaultGRPCServer,
+	})
 }
 
 func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
@@ -417,131 +358,4 @@ func handleExecutePlugin(client *porter.Client, args []string, logger hclog.Logg
 	pluginArgs := args[2:]
 
 	return client.ExecutePlugin(artifactID, pluginName, pluginArgs)
-}
-
-/*
-func handleRelease(args []string, logger hclog.Logger) error {
-	if len(args) < 2 {
-		return fmt.Errorf("version and registry required\nUsage: release <version> <registry> [--username=<user>] [--password=<pass>]")
-	}
-
-	version := args[0]
-	registry := args[1]
-
-	// Parse optional flags
-	var username, password, manifestPath string
-	for _, arg := range args[2:] {
-		if len(arg) > 11 && arg[:11] == "--username=" {
-			username = arg[11:]
-		} else if len(arg) > 11 && arg[:11] == "--password=" {
-			password = arg[11:]
-		} else if len(arg) > 11 && arg[:11] == "--manifest=" {
-			manifestPath = arg[11:]
-		}
-	}
-
-	// If no password provided, try environment
-	if password == "" {
-		password = os.Getenv("GITHUB_TOKEN")
-		if password == "" {
-			password = os.Getenv("REGISTRY_PASSWORD")
-		}
-	}
-
-	// Get git commit
-	commit := "unknown"
-	if cmd := exec.Command("git", "rev-parse", "--short", "HEAD"); cmd.Run() == nil {
-		if output, err := cmd.Output(); err == nil {
-			commit = string(output)
-		}
-	}
-
-	// Build config
-	buildConfig := release.BuildConfig{
-		Version:    version,
-		BinaryName: "porter-ds",
-		SourceDir:  "./cmd/porter",
-		OutputDir:  "bin/release",
-		LDFlags:    fmt.Sprintf("-s -w -X main.version=%s -X main.commit=%s", version, commit),
-		Commit:     commit,
-	}
-
-	// Release config
-	releaseConfig := release.ReleaseConfig{
-		Registry:     registry,
-		Repository:   "delivery-station/porter",
-		Version:      version,
-		Username:     username,
-		Password:     password,
-		TagLatest:    true,
-		ManifestPath: manifestPath,
-	}
-
-	// Create release orchestrator
-	rel, err := release.NewRelease(buildConfig, releaseConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create release: %w", err)
-	}
-
-	// Execute release
-	ctx := context.Background()
-	if err := rel.Execute(ctx, os.Stdout, os.Stderr); err != nil {
-		return fmt.Errorf("release failed: %w", err)
-	}
-
-	return nil
-}
-*/
-
-func printUsage() {
-	lines := []string{
-		"Porter - OCI Artifact Management Plugin for DS",
-		"",
-		"Usage: ds-porter <operation> [args]",
-		"",
-		"Operations:",
-		"  pull <ref>              Pull artifact from OCI registry",
-		"  push <path> <ref>       Push artifact to OCI registry",
-		"  list                    List cached artifacts",
-		"  execute-plugin <id> <plugin> [args...]",
-		"                         Execute plugin on artifact",
-		"",
-		"Pull flags:",
-		"  --output, -o <path>     Export artifact to file or directory",
-		"  --platform <os/arch>    Fetch specific platform (repeatable)",
-		"  --all-arch              Fetch every platform in the index",
-		"  --insecure              Allow plain HTTP registry access",
-		"",
-		"Multi-arch Push:",
-		"  ds-porter push <registry-ref> --manifest=<path>",
-		"",
-		"Special flags:",
-		"  --version               Print version",
-		"  --manifest              Print plugin manifest",
-	}
-	writeLines(os.Stdout, lines)
-}
-
-func printManifest() {
-	manifest := map[string]interface{}{
-		"name":        "porter",
-		"version":     "0.1.0",
-		"description": "OCI artifact management plugin for Delivery Station",
-		"platform": map[string][]string{
-			"os":   {"linux", "darwin", "windows"},
-			"arch": {"amd64", "arm64"},
-		},
-		"operations": []string{"pull", "push", "list", "execute-plugin"},
-		"config": map[string]interface{}{
-			"registries": "List of OCI registry configurations",
-			"cache_dir":  "Local cache directory for artifacts",
-		},
-	}
-
-	output, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "failed to marshal manifest: %v\n", err)
-		return
-	}
-	writeLines(os.Stdout, []string{string(output)})
 }

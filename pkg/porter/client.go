@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/delivery-station/ds/pkg/types"
 	"github.com/delivery-station/porter/pkg/release"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -34,6 +35,7 @@ type Client struct {
 type Config struct {
 	Registries []RegistryConfig `json:"registries"`
 	CacheDir   string           `json:"cache_dir"`
+	LogLevel   string           `json:"log_level"`
 }
 
 // RegistryConfig holds OCI registry configuration
@@ -73,29 +75,88 @@ type ExportOptions struct {
 	UsePlatformSubdirs bool
 }
 
-// LoadConfigFromEnv loads Porter configuration from environment variables set by DS
-func LoadConfigFromEnv() (*Config, error) {
-	configJSON := os.Getenv("DS_PORTER_CONFIG")
-	if configJSON == "" {
-		// Default configuration
+// LoadConfigFromHost retrieves configuration provided by the DS host via the plugin RPC context.
+func LoadConfigFromHost(ctx context.Context) (*Config, error) {
+	provider, ok := types.HostConfigFromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("host configuration provider not available in context")
+	}
+
+	dsConfig, err := provider.GetEffectiveConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch host configuration: %w", err)
+	}
+
+	if dsConfig == nil {
+		return nil, fmt.Errorf("host returned no configuration payload")
+	}
+
+	return buildConfigFromDS(dsConfig), nil
+}
+
+func buildConfigFromDS(dsConfig *types.Config) *Config {
+	cacheDir := dsConfig.Cache.Dir
+	if strings.TrimSpace(cacheDir) == "" {
 		homeDir, _ := os.UserHomeDir()
-		return &Config{
-			CacheDir: filepath.Join(homeDir, ".ds", "porter-cache"),
-		}, nil
+		cacheDir = filepath.Join(homeDir, ".ds", "porter-cache")
+	} else {
+		cacheDir = filepath.Join(cacheDir, "porter")
 	}
 
-	var config Config
-	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+	registries := make([]RegistryConfig, 0)
+	seen := make(map[string]struct{})
+
+	for _, cred := range dsConfig.Auth.Credentials {
+		host := normalizeRegistryHost(cred.Registry)
+		if host == "" {
+			continue
+		}
+		if _, exists := seen[host]; exists {
+			continue
+		}
+
+		entry := RegistryConfig{
+			Name:     host,
+			URL:      host,
+			Username: cred.Username,
+		}
+
+		if cred.Token != "" {
+			entry.Token = cred.Token
+		} else if cred.Password != "" {
+			entry.Password = cred.Password
+		}
+
+		registries = append(registries, entry)
+		seen[host] = struct{}{}
 	}
 
-	return &config, nil
+	if defaultRegistry := normalizeRegistryHost(dsConfig.Registry.Default); defaultRegistry != "" {
+		if _, exists := seen[defaultRegistry]; !exists {
+			registries = append(registries, RegistryConfig{
+				Name: defaultRegistry,
+				URL:  defaultRegistry,
+			})
+		}
+	}
+
+	return &Config{
+		Registries: registries,
+		CacheDir:   cacheDir,
+		LogLevel:   dsConfig.Logging.Level,
+	}
 }
 
 // NewClient creates a new Porter client
 func NewClient(cfg *Config, logger hclog.Logger) (*Client, error) {
 	if logger == nil {
 		logger = hclog.New(&hclog.LoggerOptions{Name: "porter"})
+	}
+
+	if level := strings.TrimSpace(cfg.LogLevel); level != "" {
+		if parsed := hclog.LevelFromString(level); parsed != hclog.NoLevel {
+			logger.SetLevel(parsed)
+		}
 	}
 
 	// Ensure cache directory exists
@@ -270,6 +331,18 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 	)
 
 	return result, nil
+}
+
+func normalizeRegistryHost(value string) string {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimPrefix(trimmed, "https://")
+	trimmed = strings.TrimPrefix(trimmed, "http://")
+	trimmed = strings.TrimSuffix(trimmed, "/")
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.Split(trimmed, "/")
+	return parts[0]
 }
 
 // PushArtifact pushes an artifact to an OCI registry
@@ -506,18 +579,22 @@ func (c *Client) resolveCredentials(registry string) (string, string) {
 		if username == "" && password != "" {
 			username = defaultUsername()
 		}
+		source := "porter-config"
+		c.logger.Debug("Resolved registry credentials",
+			"registry", registry,
+			"normalized", normalized,
+			"source", source,
+			"username", username,
+			"password_set", password != "",
+		)
 		return username, password
 	}
 
-	username := os.Getenv("REGISTRY_USERNAME")
-	password := os.Getenv("REGISTRY_PASSWORD")
-	if password == "" {
-		password = os.Getenv("GITHUB_TOKEN")
-	}
-	if username == "" && password != "" {
-		username = defaultUsername()
-	}
-	return username, password
+	c.logger.Debug("No registry credentials found",
+		"registry", registry,
+		"normalized", normalized,
+	)
+	return "", ""
 }
 
 // ResolveCredentials exposes the resolved credentials for a registry.
@@ -536,15 +613,6 @@ func normalizeRegistry(value string) string {
 }
 
 func defaultUsername() string {
-	if v := os.Getenv("REGISTRY_USER"); v != "" {
-		return v
-	}
-	if v := os.Getenv("REGISTRY_USERNAME"); v != "" {
-		return v
-	}
-	if v := os.Getenv("GITHUB_USER"); v != "" {
-		return v
-	}
 	return "token"
 }
 

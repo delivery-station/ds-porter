@@ -4,6 +4,7 @@ annotations:
   version: 0.1.0
   description: Delivery Station Plugin. Porter is a tool for building, managing, and deploying cloud-native applications using a simple, declarative format.
   url: https://github.com/delivery-station/ds-porter
+  org.opencontainers.image.source: https://github.com/delivery-station/ds-porter
   vendor: Kharkevich Engineering Lab
   license: MIT
 manifests:
