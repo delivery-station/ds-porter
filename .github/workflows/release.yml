@@ -24,7 +24,7 @@ jobs:
       - name: Install Delivery Station CLI with Porter plugin
         uses: delivery-station/setup-ds-action@main
         with:
-          plugins: porter
+          plugins: ds-porter
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to GHCR
