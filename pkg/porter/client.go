@@ -1,11 +1,14 @@
 package porter
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -370,10 +373,22 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 	}
 
 	entries := make(map[release.Platform]release.ManifestEntry, len(manifest.Manifests))
+	var cleanups []func()
+	defer func() {
+		for _, fn := range cleanups {
+			if fn != nil {
+				fn()
+			}
+		}
+	}()
+
 	for _, entry := range manifest.Manifests {
-		prepared, platform, prepErr := prepareManifestEntry(entry, manifestDir)
+		prepared, platform, cleanup, prepErr := prepareManifestEntry(entry, manifestDir)
 		if prepErr != nil {
 			return nil, prepErr
+		}
+		if cleanup != nil {
+			cleanups = append(cleanups, cleanup)
 		}
 		entries[platform] = prepared
 	}
@@ -462,7 +477,16 @@ func loadPushManifest(path string) (*release.Manifest, string, error) {
 		return nil, "", fmt.Errorf("failed to access %s: %w", path, err)
 	}
 	if info.IsDir() {
-		return nil, "", fmt.Errorf("manifest path %s is a directory", path)
+		defaultPlatform := release.GetCurrentPlatform()
+		return &release.Manifest{
+			ArtifactType: release.MediaTypeArtifactIndex,
+			Annotations:  map[string]string{},
+			Manifests: []release.ManifestEntry{{
+				Platform:  defaultPlatform.FormatString(),
+				Path:      path,
+				MediaType: release.MediaTypeArtifactArchive,
+			}},
+		}, filepath.Dir(path), nil
 	}
 
 	manifest, err := release.LoadManifest(path)
@@ -480,19 +504,19 @@ func loadPushManifest(path string) (*release.Manifest, string, error) {
 
 	defaultPlatform := release.GetCurrentPlatform()
 	return &release.Manifest{
-		ArtifactType: "application/vnd.delivery-station.plugin.index.v1+json",
+		ArtifactType: release.MediaTypeArtifactIndex,
 		Annotations:  map[string]string{},
 		Manifests: []release.ManifestEntry{{
 			Platform:  defaultPlatform.FormatString(),
 			Path:      path,
-			MediaType: "application/vnd.delivery-station.plugin.v1+binary",
+			MediaType: release.MediaTypeArtifactBinary,
 		}},
 	}, filepath.Dir(path), nil
 }
 
-func prepareManifestEntry(entry release.ManifestEntry, baseDir string) (release.ManifestEntry, release.Platform, error) {
+func prepareManifestEntry(entry release.ManifestEntry, baseDir string) (release.ManifestEntry, release.Platform, func(), error) {
 	if strings.TrimSpace(entry.Path) == "" {
-		return release.ManifestEntry{}, release.Platform{}, fmt.Errorf("manifest entry missing path")
+		return release.ManifestEntry{}, release.Platform{}, nil, fmt.Errorf("manifest entry missing path")
 	}
 
 	resolvedPath := entry.Path
@@ -501,17 +525,134 @@ func prepareManifestEntry(entry release.ManifestEntry, baseDir string) (release.
 	}
 	resolvedPath = filepath.Clean(resolvedPath)
 
-	if _, err := os.Stat(resolvedPath); err != nil {
-		return release.ManifestEntry{}, release.Platform{}, fmt.Errorf("manifest entry path %s: %w", resolvedPath, err)
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		return release.ManifestEntry{}, release.Platform{}, nil, fmt.Errorf("manifest entry path %s: %w", resolvedPath, err)
 	}
 
 	platform, err := parseManifestPlatform(entry.Platform)
 	if err != nil {
-		return release.ManifestEntry{}, release.Platform{}, err
+		return release.ManifestEntry{}, release.Platform{}, nil, err
 	}
 
-	entry.Path = resolvedPath
-	return entry, platform, nil
+	var cleanup func()
+	if info.IsDir() {
+		archivePath, archiveCleanup, archiveErr := createArchiveFromDirectory(resolvedPath)
+		if archiveErr != nil {
+			return release.ManifestEntry{}, release.Platform{}, nil, archiveErr
+		}
+		cleanup = archiveCleanup
+		entry.Path = archivePath
+		if strings.TrimSpace(entry.MediaType) == "" {
+			entry.MediaType = release.MediaTypeArtifactArchive
+		}
+	} else {
+		entry.Path = resolvedPath
+		if strings.TrimSpace(entry.MediaType) == "" {
+			entry.MediaType = release.MediaTypeArtifactBinary
+		}
+	}
+
+	return entry, platform, cleanup, nil
+}
+
+func createArchiveFromDirectory(dir string) (string, func(), error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to stat directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", nil, fmt.Errorf("path %s is not a directory", dir)
+	}
+
+	archiveFile, err := os.CreateTemp("", "ds-porter-archive-*.tar.gz")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary archive: %w", err)
+	}
+
+	gzipWriter := gzip.NewWriter(archiveFile)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = tarWriter.Close()
+		_ = gzipWriter.Close()
+		_ = archiveFile.Close()
+		_ = os.Remove(archiveFile.Name())
+		return "", nil, fmt.Errorf("failed to resolve directory %s: %w", dir, err)
+	}
+
+	walkErr := filepath.WalkDir(dirAbs, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		relPath, relErr := filepath.Rel(dirAbs, path)
+		if relErr != nil {
+			return relErr
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+
+		header, headerErr := tar.FileInfoHeader(info, "")
+		if headerErr != nil {
+			return headerErr
+		}
+		header.Name = filepath.ToSlash(relPath)
+
+		if d.Type()&os.ModeSymlink != 0 {
+			target, linkErr := os.Readlink(path)
+			if linkErr != nil {
+				return linkErr
+			}
+			header.Linkname = target
+		}
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return openErr
+		}
+		if _, copyErr := io.Copy(tarWriter, file); copyErr != nil {
+			_ = file.Close()
+			return copyErr
+		}
+		return file.Close()
+	})
+
+	firstErr := walkErr
+	if closeErr := tarWriter.Close(); firstErr == nil {
+		firstErr = closeErr
+	}
+	if gzipErr := gzipWriter.Close(); firstErr == nil {
+		firstErr = gzipErr
+	}
+	if closeErr := archiveFile.Close(); firstErr == nil {
+		firstErr = closeErr
+	}
+
+	if firstErr != nil {
+		_ = os.Remove(archiveFile.Name())
+		return "", nil, fmt.Errorf("failed to archive directory %s: %w", dir, firstErr)
+	}
+
+	archivePath := archiveFile.Name()
+	return archivePath, func() {
+		_ = os.Remove(archivePath)
+	}, nil
 }
 
 func parseManifestPlatform(value string) (release.Platform, error) {

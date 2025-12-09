@@ -38,6 +38,13 @@ type ManifestEntry struct {
 	Path      string `yaml:"path"`
 }
 
+// Delivery Station media types for general artifacts.
+const (
+	MediaTypeArtifactBinary  = "application/vnd.delivery-station.artifact.v1+binary"
+	MediaTypeArtifactArchive = "application/vnd.delivery-station.artifact.v1+archive.tar+gzip"
+	MediaTypeArtifactIndex   = "application/vnd.delivery-station.artifact.index.v1+json"
+)
+
 // LoadManifest reads and parses the manifest file
 func LoadManifest(path string) (*Manifest, error) {
 	data, err := os.ReadFile(path)
@@ -248,16 +255,17 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	store := NewFileStore()
 
 	// Add binary file to store (calculates digest, doesn't copy)
-	binaryDesc, err := store.AddFile(binaryPath, "application/octet-stream")
+	layerMediaType := entry.MediaType
+	if strings.TrimSpace(layerMediaType) == "" {
+		layerMediaType = MediaTypeArtifactBinary
+	}
+	binaryDesc, err := store.AddFile(binaryPath, layerMediaType)
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("failed to add binary to store: %w", err)
 	}
 
 	// Create artifact manifest
-	artifactType := "application/vnd.delivery-station.plugin.v1+binary"
-	if entry.MediaType != "" {
-		artifactType = entry.MediaType
-	}
+	artifactType := layerMediaType
 	opts := oras.PackManifestOptions{
 		Layers: []ocispec.Descriptor{binaryDesc},
 	}
@@ -338,7 +346,7 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec
 	}
 
 	// Create index manifest
-	artifactType := "application/vnd.delivery-station.plugin.index.v1+json"
+	artifactType := MediaTypeArtifactIndex
 	if manifest != nil && manifest.ArtifactType != "" {
 		artifactType = manifest.ArtifactType
 	}

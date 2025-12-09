@@ -7,11 +7,6 @@ COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE?=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)"
 
-# OCI Registry variables
-REGISTRY?=ghcr.io/delivery-station/porter
-IMAGE_NAME=$(REGISTRY):$(VERSION)
-IMAGE_LATEST=$(REGISTRY):latest
-
 # Go commands
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -61,6 +56,7 @@ lint: ## Run linters
 	$(GOVET) ./...
 	@echo "Checking go mod tidy..."
 	$(GOMOD) tidy
+	golangci-lint run
 	@git diff --exit-code go.mod go.sum || (echo "go.mod or go.sum needs updating" && exit 1)
 
 clean: ## Clean build artifacts
@@ -68,14 +64,6 @@ clean: ## Clean build artifacts
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 	@echo "Clean complete"
-
-install: build ## Install binary to $GOPATH/bin
-	@echo "Installing $(BINARY_NAME)..."
-	@cp $(BUILD_DIR)/$(BINARY_NAME) $(GOPATH)/bin/$(BINARY_NAME)
-	@echo "Installed to $(GOPATH)/bin/$(BINARY_NAME)"
-
-run: build ## Build and run the binary
-	@$(BUILD_DIR)/$(BINARY_NAME)
 
 deps: ## Download dependencies
 	@echo "Downloading dependencies..."
