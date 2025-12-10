@@ -18,6 +18,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	pkgplugin "github.com/delivery-station/ds/pkg/plugin"
+	"github.com/delivery-station/ds/pkg/types"
 	"github.com/hashicorp/go-plugin"
 )
 
@@ -66,60 +67,34 @@ func main() {
 	})
 }
 
-func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) (*porter.ArtifactResult, error) {
-	for _, arg := range args {
-		if isHelpFlag(arg) {
-			printPullUsage(stdout)
-			return nil, nil
-		}
+func handlePull(client *porter.Client, args types.PluginArgs, logger hclog.Logger, stdout io.Writer) (*porter.ArtifactResult, error) {
+	if help, ok := args.BoolAny("help", "h"); ok && help {
+		printPullUsage(stdout)
+		return nil, nil
 	}
 
-	if len(args) < 1 {
+	ref, _ := args.FirstAny("ref", "artifact", "arg0")
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
 		printPullUsage(stdout)
 		return nil, fmt.Errorf("artifact reference required")
 	}
 
-	var ref string
-	var insecure bool
-	var output string
-	var allPlatforms bool
-	var platformSelections []string
-
-	// Parse args
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if isHelpFlag(arg) {
-			printPullUsage(stdout)
-			return nil, nil
-		} else if arg == "--insecure" {
-			insecure = true
-		} else if arg == "-o" || arg == "--output" {
-			if i+1 < len(args) {
-				output = args[i+1]
-				i++ // skip next arg
-			} else {
-				return nil, fmt.Errorf("output path required for %s", arg)
-			}
-		} else if arg == "--all-arch" {
-			allPlatforms = true
-		} else if arg == "--platform" {
-			if i+1 >= len(args) {
-				return nil, fmt.Errorf("platform value required for %s", arg)
-			}
-			platformSelections = append(platformSelections, args[i+1])
-			i++
-		} else if strings.HasPrefix(arg, "--platform=") {
-			platformSelections = append(platformSelections, strings.TrimPrefix(arg, "--platform="))
-		} else if strings.HasPrefix(arg, "--output=") {
-			output = strings.TrimPrefix(arg, "--output=")
-		} else if ref == "" {
-			ref = arg
-		}
+	insecure := false
+	if val, ok := args.Bool("insecure"); ok {
+		insecure = val
 	}
 
-	if ref == "" {
-		return nil, fmt.Errorf("artifact reference required")
+	output, _ := args.FirstAny("output", "o")
+	output = strings.TrimSpace(output)
+
+	allPlatforms := false
+	if val, ok := args.BoolAny("all-arch"); ok {
+		allPlatforms = val
 	}
+
+	platformSelections := cleanedValues(args.All("platform"))
+	platformSelections = append(platformSelections, cleanedValues(args.All("platforms"))...)
 
 	if allPlatforms && len(platformSelections) > 0 {
 		return nil, fmt.Errorf("--all-arch cannot be combined with --platform")
@@ -130,7 +105,6 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 		return nil, err
 	}
 
-	// If output is specified, export the artifact
 	if output != "" {
 		exportOpts, err := buildExportOptions(allPlatforms, platformSelections)
 		if err != nil {
@@ -174,6 +148,20 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 	}
 
 	return result, nil
+}
+
+func cleanedValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func buildExportOptions(allPlatforms bool, selections []string) (porter.ExportOptions, error) {
@@ -226,15 +214,6 @@ func parsePlatformSelection(value string) (ocispec.Platform, error) {
 	return plat, nil
 }
 
-func isHelpFlag(arg string) bool {
-	switch strings.ToLower(strings.TrimSpace(arg)) {
-	case "-h", "--help", "help":
-		return true
-	default:
-		return false
-	}
-}
-
 func printPullUsage(w io.Writer) {
 	lines := []string{
 		"Usage: ds porter pull [flags] <artifact-ref>",
@@ -258,56 +237,31 @@ func printPullUsage(w io.Writer) {
 	writeLines(w, lines)
 }
 
-func handlePush(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
-	if len(args) < 1 {
-		return fmt.Errorf("artifact reference required")
+func handlePush(client *porter.Client, args types.PluginArgs, logger hclog.Logger, stdout io.Writer) error {
+	manifestPath, _ := args.FirstAny("manifest", "m")
+	manifestPath = strings.TrimSpace(manifestPath)
+
+	insecure := false
+	if val, ok := args.Bool("insecure"); ok {
+		insecure = val
 	}
 
-	// Check for manifest flag
-	var manifestPath string
-	var ref string
-	var path string
-	var insecure bool
-	var positionalArgs []string
+	positionals := cleanedValues(args.Positionals())
 
-	// Parse args
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "--manifest=") {
-			manifestPath = arg[11:]
-			continue
-		}
-		if arg == "--manifest" {
-			if i+1 >= len(args) {
-				return fmt.Errorf("manifest path required for --manifest")
-			}
-			manifestPath = args[i+1]
-			i++
-			continue
-		}
-		if arg == "--insecure" {
-			insecure = true
-			continue
-		}
-
-		positionalArgs = append(positionalArgs, arg)
-	}
-
-	// Multi-arch push via manifest
 	if manifestPath != "" {
-		if len(positionalArgs) < 1 {
+		if len(positionals) < 1 {
 			return fmt.Errorf("registry reference required")
 		}
-		ref = positionalArgs[0]
+		ref := positionals[0]
 		return handleMultiArchPush(client, ref, manifestPath, logger, stdout, insecure)
 	}
 
-	// Single artifact push
-	if len(positionalArgs) < 2 {
+	if len(positionals) < 2 {
 		return fmt.Errorf("artifact path and reference required")
 	}
-	path = positionalArgs[0]
-	ref = positionalArgs[1]
+
+	path := positionals[0]
+	ref := positionals[1]
 
 	result, err := client.PushArtifact(path, ref, insecure)
 	if err != nil {
@@ -363,7 +317,7 @@ func handleMultiArchPush(client *porter.Client, ref, manifestPath string, logger
 	return pusher.Push(context.Background(), stdout)
 }
 
-func handleList(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
+func handleList(client *porter.Client, _ types.PluginArgs, logger hclog.Logger, stdout io.Writer) error {
 	artifacts, err := client.ListCachedArtifacts()
 	if err != nil {
 		return err
@@ -379,14 +333,15 @@ func handleList(client *porter.Client, args []string, logger hclog.Logger, stdou
 	return nil
 }
 
-func handleExecutePlugin(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
-	if len(args) < 2 {
+func handleExecutePlugin(client *porter.Client, args types.PluginArgs, logger hclog.Logger, stdout io.Writer) error {
+	positionals := cleanedValues(args.Positionals())
+	if len(positionals) < 2 {
 		return fmt.Errorf("artifact ID and plugin name required")
 	}
 
-	artifactID := args[0]
-	pluginName := args[1]
-	pluginArgs := args[2:]
+	artifactID := positionals[0]
+	pluginName := positionals[1]
+	pluginArgs := positionals[2:]
 
 	return client.ExecutePlugin(artifactID, pluginName, pluginArgs)
 }

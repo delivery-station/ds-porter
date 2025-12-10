@@ -14,6 +14,8 @@ require (
 	oras.land/oras-go/v2 v2.6.0
 )
 
+replace github.com/delivery-station/ds => ../ds
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/docker/cli v29.1.2+incompatible // indirect

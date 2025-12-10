@@ -202,7 +202,8 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 	}
 
 	// Setup ORAS repository
-	repo, err := remote.NewRepository(ref)
+	repoName := imgRef.Context().Name()
+	repo, err := remote.NewRepository(repoName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
@@ -247,7 +248,14 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 	c.logger.Info("Copying artifact to cache", "target", targetRef)
 	desc, err := oras.Copy(ctx, repo, targetRef, store, targetRef, oras.CopyOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to copy artifact: %w", err)
+		if !insecure && strings.Contains(err.Error(), "server gave HTTP response to HTTPS client") {
+			c.logger.Warn("Retrying pull over plain HTTP", "ref", ref)
+			repo.PlainHTTP = true
+			desc, err = oras.Copy(ctx, repo, targetRef, store, targetRef, oras.CopyOptions{})
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy artifact: %w", err)
+		}
 	}
 
 	// Update artifact ID to include digest for uniqueness if desired,
@@ -970,8 +978,33 @@ type manifestSelection struct {
 }
 
 func (c *Client) selectManifests(ctx context.Context, store *oci.Store, root ocispec.Descriptor, opts ExportOptions) ([]manifestSelection, error) {
-	if isIndexDescriptor(root) {
-		indexBytes, err := content.FetchAll(ctx, store, root)
+	seen := make(map[string]struct{})
+	selections, err := c.collectManifests(ctx, store, root, root.Platform, opts, seen)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(selections) == 0 {
+		if !opts.AllPlatforms && len(opts.Platforms) > 0 {
+			return nil, fmt.Errorf("no manifests found for requested platform(s)")
+		}
+		return nil, fmt.Errorf("no manifests found in index")
+	}
+
+	return selections, nil
+}
+
+func (c *Client) collectManifests(ctx context.Context, store *oci.Store, desc ocispec.Descriptor, platformHint *ocispec.Platform, opts ExportOptions, seen map[string]struct{}) ([]manifestSelection, error) {
+	key := desc.Digest.String()
+	if key != "" {
+		if _, ok := seen[key]; ok {
+			return nil, nil
+		}
+		seen[key] = struct{}{}
+	}
+
+	if isIndexDescriptor(desc) {
+		indexBytes, err := content.FetchAll(ctx, store, desc)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read index: %w", err)
 		}
@@ -981,28 +1014,30 @@ func (c *Client) selectManifests(ctx context.Context, store *oci.Store, root oci
 		}
 
 		var selections []manifestSelection
-		for _, manifest := range index.Manifests {
-			if opts.AllPlatforms || platformMatches(manifest.Platform, opts.Platforms) {
-				selections = append(selections, manifestSelection{Descriptor: manifest, Platform: manifest.Platform})
+		for _, child := range index.Manifests {
+			childHint := child.Platform
+			if childHint == nil {
+				childHint = platformHint
 			}
-		}
-
-		if len(selections) == 0 && !opts.AllPlatforms && len(opts.Platforms) > 0 {
-			return nil, fmt.Errorf("no manifests found for requested platform(s)")
-		}
-
-		if len(selections) == 0 {
-			if len(index.Manifests) == 1 {
-				entry := index.Manifests[0]
-				return []manifestSelection{{Descriptor: entry, Platform: entry.Platform}}, nil
+			childSelections, err := c.collectManifests(ctx, store, child, childHint, opts, seen)
+			if err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("no manifests found in index")
+			selections = append(selections, childSelections...)
 		}
-
 		return selections, nil
 	}
 
-	return []manifestSelection{{Descriptor: root, Platform: root.Platform}}, nil
+	platform := desc.Platform
+	if platform == nil {
+		platform = platformHint
+	}
+
+	if !opts.AllPlatforms && len(opts.Platforms) > 0 && !platformMatches(platform, opts.Platforms) {
+		return nil, nil
+	}
+
+	return []manifestSelection{{Descriptor: desc, Platform: platform}}, nil
 }
 
 func (c *Client) exportManifestToFile(ctx context.Context, store *oci.Store, manifestDesc ocispec.Descriptor, destination string) ([]string, error) {

@@ -59,6 +59,40 @@ func TestPorterPlugin_Execute_Help(t *testing.T) {
 	}
 }
 
+func TestPorterPlugin_GetManifest(t *testing.T) {
+	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Info})
+	plug := NewPorterPlugin(logger, "0.9.1", "abcdef123", "2025-12-01T00:00:00Z")
+
+	manifest, err := plug.GetManifest(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if manifest == nil {
+		t.Fatalf("expected manifest, got nil")
+	}
+
+	if manifest.Name != "porter" {
+		t.Fatalf("expected name 'porter', got %q", manifest.Name)
+	}
+
+	if manifest.Version != "0.9.1" {
+		t.Fatalf("expected version '0.9.1', got %q", manifest.Version)
+	}
+
+	if manifest.Description == "" {
+		t.Fatalf("expected description to be populated")
+	}
+
+	if len(manifest.Commands) < 4 {
+		t.Fatalf("expected commands to include primary operations, got %v", manifest.Commands)
+	}
+
+	if len(manifest.Platform.OS) == 0 || len(manifest.Platform.Arch) == 0 {
+		t.Fatalf("expected platform compatibility to be defined")
+	}
+}
+
 func TestPorterPlugin_Execute_Unknown(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Debug})
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")

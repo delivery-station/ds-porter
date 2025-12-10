@@ -30,12 +30,18 @@ func NewPorterPlugin(logger hclog.Logger, version, commit, date string) *PorterP
 	}
 }
 
-func (p *PorterPlugin) GetMetadata(ctx context.Context) (*types.PluginMetadata, error) {
-	return &types.PluginMetadata{
+func (p *PorterPlugin) GetManifest(ctx context.Context) (*types.PluginManifest, error) {
+	return &types.PluginManifest{
 		Name:        "porter",
 		Version:     p.version,
 		Description: "Fetch and deliver OCI artifacts",
-		Operations:  []string{"pull", "push", "list", "execute-plugin"},
+		Commands: []types.PluginCommand{
+			{Name: "pull", Description: "Pull an OCI artifact"},
+			{Name: "push", Description: "Push an OCI artifact"},
+			{Name: "list", Description: "List cached artifacts"},
+			{Name: "execute-plugin", Description: "Execute a plugin contained in an artifact"},
+			{Name: "version", Description: "Display plugin version information"},
+		},
 		Platform: types.PluginPlatform{
 			OS:   []string{"linux", "darwin", "windows"},
 			Arch: []string{"amd64", "arm64"},
@@ -89,11 +95,12 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 	var stdoutBuf bytes.Buffer
 	var errExec error
 	finalizers := []types.FinalizerRequest{}
+	parsedArgs := types.NewPluginArgs(args)
 
 	switch operation {
 	case "pull":
 		var pullResult *porter.ArtifactResult
-		pullResult, errExec = handlePull(client, args, p.logger, &stdoutBuf)
+		pullResult, errExec = handlePull(client, parsedArgs, p.logger, &stdoutBuf)
 		if errExec == nil && pullResult != nil {
 			jsonOutput, marshalErr := json.Marshal(pullResult)
 			if marshalErr != nil {
@@ -105,11 +112,11 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 			}
 		}
 	case "push":
-		errExec = handlePush(client, args, p.logger, &stdoutBuf)
+		errExec = handlePush(client, parsedArgs, p.logger, &stdoutBuf)
 	case "list":
-		errExec = handleList(client, args, p.logger, &stdoutBuf)
+		errExec = handleList(client, parsedArgs, p.logger, &stdoutBuf)
 	case "execute-plugin":
-		errExec = handleExecutePlugin(client, args, p.logger, &stdoutBuf)
+		errExec = handleExecutePlugin(client, parsedArgs, p.logger, &stdoutBuf)
 	case "help":
 		stdoutBuf.WriteString(`Available commands:
   pull <artifact>    Pull an artifact
