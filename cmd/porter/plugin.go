@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/delivery-station/ds/pkg/types"
@@ -15,10 +17,12 @@ import (
 
 // PorterPlugin implements the DS PluginProtocol
 type PorterPlugin struct {
-	logger  hclog.Logger
-	version string
-	commit  string
-	date    string
+	logger      hclog.Logger
+	version     string
+	commit      string
+	date        string
+	logCloser   io.Closer
+	lastLogging porter.NormalizedLogging
 }
 
 func NewPorterPlugin(logger hclog.Logger, version, commit, date string) *PorterPlugin {
@@ -30,8 +34,8 @@ func NewPorterPlugin(logger hclog.Logger, version, commit, date string) *PorterP
 	}
 }
 
-func (p *PorterPlugin) GetManifest(ctx context.Context) (*types.PluginManifest, error) {
-	return &types.PluginManifest{
+func (p *PorterPlugin) GetManifest(ctx context.Context) (*types.PluginInfo, error) {
+	return &types.PluginInfo{
 		Name:        "porter",
 		Version:     p.version,
 		Description: "Fetch and deliver OCI artifacts",
@@ -49,17 +53,7 @@ func (p *PorterPlugin) GetManifest(ctx context.Context) (*types.PluginManifest, 
 	}, nil
 }
 
-func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []string, env map[string]string) (*types.ExecutionResult, error) {
-	// Set env vars for the operation
-	for k, v := range env {
-		if err := os.Setenv(k, v); err != nil {
-			return &types.ExecutionResult{
-				ExitCode: 1,
-				Error:    fmt.Sprintf("failed to set environment variable %s: %v", k, err),
-			}, nil
-		}
-	}
-
+func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []string) (*types.ExecutionResult, error) {
 	// Load configuration supplied by DS host
 	config, err := porter.LoadConfigFromHost(ctx)
 	if err != nil {
@@ -70,13 +64,25 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 		}, nil
 	}
 
-	if level := strings.TrimSpace(config.LogLevel); level != "" {
-		if parsed := hclog.LevelFromString(level); parsed != hclog.NoLevel {
-			p.logger.SetLevel(parsed)
-		} else {
-			p.logger.Warn("Received unknown log level from DS", "level", level)
-		}
+	normalizedLogging := porter.NormalizeLoggingConfig(config.Logging, config.LogLevel)
+	if !normalizedLogging.LevelValid && strings.TrimSpace(config.Logging.Level) != "" {
+		p.logger.Warn("Received unknown log level from DS", "level", config.Logging.Level)
 	}
+	if !normalizedLogging.FormatValid && strings.TrimSpace(config.Logging.Format) != "" {
+		p.logger.Warn("Received unknown log format from DS", "format", config.Logging.Format)
+	}
+
+	outputTarget := logOutputTarget(normalizedLogging.Output)
+	p.logger.Debug("Applying DS logging configuration", "level", normalizedLogging.Level, "format", normalizedLogging.Format, "output", outputTarget)
+
+	if err := p.applyLoggingConfig(normalizedLogging); err != nil {
+		p.logger.Warn("Failed to apply logging configuration", "error", err)
+	}
+
+	config.LogLevel = normalizedLogging.Level
+	config.Logging.Level = normalizedLogging.Level
+	config.Logging.Format = normalizedLogging.Format
+	config.Logging.Output = normalizedLogging.Output
 
 	client, err := porter.NewClient(config, p.logger)
 	if err != nil {
@@ -96,6 +102,7 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 	var errExec error
 	finalizers := []types.FinalizerRequest{}
 	parsedArgs := types.NewPluginArgs(args)
+	p.logger.Debug("Executing porter operation", "operation", operation, "arg_count", len(args))
 
 	switch operation {
 	case "pull":
@@ -143,6 +150,117 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 		ExitCode:   0,
 		Finalizers: finalizers,
 	}, nil
+}
+
+func (p *PorterPlugin) applyLoggingConfig(normalized porter.NormalizedLogging) error {
+	if p.logger == nil {
+		logger, closer, err := newLoggerForConfig(normalized)
+		if err != nil {
+			return err
+		}
+		p.logger = logger
+		p.logCloser = closer
+		p.lastLogging = normalized
+		return nil
+	}
+
+	if p.lastLogging.Equal(normalized) {
+		porter.ApplyLogLevel(p.logger, normalized)
+		return nil
+	}
+
+	if p.lastLogging.Format == normalized.Format && p.lastLogging.Output == normalized.Output {
+		porter.ApplyLogLevel(p.logger, normalized)
+		p.lastLogging = normalized
+		return nil
+	}
+
+	logger, closer, err := newLoggerForConfig(normalized)
+	if err != nil {
+		return err
+	}
+
+	if p.logCloser != nil {
+		_ = p.logCloser.Close()
+	}
+
+	porter.ApplyLogLevel(logger, normalized)
+	p.logger = logger
+	p.logCloser = closer
+	p.lastLogging = normalized
+	return nil
+}
+
+func newLoggerForConfig(normalized porter.NormalizedLogging) (hclog.Logger, io.Closer, error) {
+	writer, closer, err := resolveLogOutput(normalized.Output)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	lvl := hclog.LevelFromString(normalized.Level)
+	if lvl == hclog.NoLevel {
+		lvl = hclog.Info
+	}
+
+	opts := &hclog.LoggerOptions{
+		Name:       "porter",
+		Output:     writer,
+		Level:      lvl,
+		JSONFormat: normalized.IsJSON(),
+		Color:      hclog.AutoColor,
+	}
+	if normalized.IsJSON() {
+		opts.Color = hclog.ColorOff
+	}
+
+	return hclog.New(opts), closer, nil
+}
+
+func resolveLogOutput(output string) (io.Writer, io.Closer, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return os.Stderr, nil, nil
+	}
+	if strings.EqualFold(trimmed, "stdout") {
+		return os.Stdout, nil, nil
+	}
+	if strings.EqualFold(trimmed, "stderr") {
+		return os.Stderr, nil, nil
+	}
+
+	dir := filepath.Dir(trimmed)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	file, err := os.OpenFile(trimmed, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return file, file, nil
+}
+
+func (p *PorterPlugin) Close() error {
+	if p.logCloser == nil {
+		return nil
+	}
+
+	defer func() {
+		p.logCloser = nil
+	}()
+
+	return p.logCloser.Close()
+}
+
+func logOutputTarget(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return "stderr"
+	}
+	return trimmed
 }
 
 func (p *PorterPlugin) ValidateConfig(ctx context.Context, config map[string]interface{}) error {

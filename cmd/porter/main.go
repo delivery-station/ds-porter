@@ -34,27 +34,11 @@ var (
 
 func main() {
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "-version", "--version":
-			lines := []string{
-				fmt.Sprintf("porter version %s", version),
-				fmt.Sprintf("  commit: %s", commit),
-				fmt.Sprintf("  built:  %s", date),
-			}
-			writeLines(os.Stdout, lines)
-			return
-		case "-help", "--help", "help":
-			fmt.Fprintln(os.Stderr, "porter is a Delivery Station plugin and must be launched by DS.")
-			os.Exit(1)
-		}
+		fmt.Fprintln(os.Stderr, "porter is a Delivery Station plugin and must be launched by DS.")
+		os.Exit(1)
 	}
 
-	logger := hclog.New(&hclog.LoggerOptions{
-		Name:       "porter",
-		Output:     os.Stderr,
-		Level:      hclog.Info,
-		JSONFormat: true,
-	})
+	logger := hclog.New(&hclog.LoggerOptions{Name: "porter"})
 
 	porterPlugin := NewPorterPlugin(logger, version, commit, date)
 
@@ -99,10 +83,14 @@ func handlePull(client *porter.Client, args types.PluginArgs, logger hclog.Logge
 	if allPlatforms && len(platformSelections) > 0 {
 		return nil, fmt.Errorf("--all-arch cannot be combined with --platform")
 	}
+	logger.Debug("Resolved pull options", "ref", ref, "insecure", insecure, "output", output, "all_platforms", allPlatforms, "platforms", platformSelections)
 
 	result, err := client.PullArtifact(ref, insecure)
 	if err != nil {
 		return nil, err
+	}
+	if result != nil {
+		logger.Debug("Pull completed", "ref", ref, "digest", result.Digest, "cached", result.Cached, "cache_path", result.LocalPath)
 	}
 
 	if output != "" {
@@ -144,6 +132,7 @@ func handlePull(client *porter.Client, args types.PluginArgs, logger hclog.Logge
 					}
 				}
 			}
+			logger.Debug("Exported artifact content", "paths", exportedPaths)
 		}
 	}
 
@@ -286,6 +275,7 @@ func writeLines(w io.Writer, lines []string) {
 		}
 	}
 }
+
 func handleMultiArchPush(client *porter.Client, ref, manifestPath string, logger hclog.Logger, stdout io.Writer, insecure bool) error {
 	// Parse registry and repository from ref
 	// ref format: registry/repo[:tag]

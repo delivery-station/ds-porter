@@ -90,6 +90,7 @@ func TestNewClientAppliesLogLevel(t *testing.T) {
 	cfg := &Config{
 		CacheDir: tmpDir,
 		LogLevel: "trace",
+		Logging:  types.LoggingConfig{Level: "trace"},
 	}
 
 	logger := hclog.New(&hclog.LoggerOptions{Name: "test", Level: hclog.Info})

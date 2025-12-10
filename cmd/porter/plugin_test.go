@@ -38,9 +38,8 @@ func TestPorterPlugin_Execute_Help(t *testing.T) {
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
 	ctx := newHostConfigContext(t)
-	env := make(map[string]string)
 
-	result, err := plugin.Execute(ctx, "help", []string{}, env)
+	result, err := plugin.Execute(ctx, "help", []string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,9 +97,8 @@ func TestPorterPlugin_Execute_Unknown(t *testing.T) {
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
 	ctx := newHostConfigContext(t)
-	env := make(map[string]string)
 
-	result, err := plugin.Execute(ctx, "unknown", []string{}, env)
+	result, err := plugin.Execute(ctx, "unknown", []string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,9 +122,8 @@ func TestPorterPlugin_Execute_Version(t *testing.T) {
 	plugin := NewPorterPlugin(logger, "0.1.0", "test-commit", "test-date")
 
 	ctx := newHostConfigContext(t)
-	env := make(map[string]string)
 
-	result, err := plugin.Execute(ctx, "version", []string{}, env)
+	result, err := plugin.Execute(ctx, "version", []string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

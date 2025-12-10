@@ -36,9 +36,10 @@ type Client struct {
 
 // Config holds Porter plugin configuration provided by DS
 type Config struct {
-	Registries []RegistryConfig `json:"registries"`
-	CacheDir   string           `json:"cache_dir"`
-	LogLevel   string           `json:"log_level"`
+	Registries []RegistryConfig    `json:"registries"`
+	CacheDir   string              `json:"cache_dir"`
+	LogLevel   string              `json:"log_level"`
+	Logging    types.LoggingConfig `json:"logging"`
 }
 
 // RegistryConfig holds OCI registry configuration
@@ -143,24 +144,53 @@ func buildConfigFromDS(dsConfig *types.Config) *Config {
 		}
 	}
 
+	logging := types.LoggingConfig{
+		Level:  strings.TrimSpace(dsConfig.Logging.Level),
+		Format: strings.TrimSpace(dsConfig.Logging.Format),
+		Output: strings.TrimSpace(dsConfig.Logging.Output),
+	}
+
 	return &Config{
 		Registries: registries,
 		CacheDir:   cacheDir,
-		LogLevel:   dsConfig.Logging.Level,
+		LogLevel:   logging.Level,
+		Logging:    logging,
 	}
 }
 
 // NewClient creates a new Porter client
 func NewClient(cfg *Config, logger hclog.Logger) (*Client, error) {
-	if logger == nil {
-		logger = hclog.New(&hclog.LoggerOptions{Name: "porter"})
+	if cfg == nil {
+		return nil, fmt.Errorf("configuration is required")
 	}
 
-	if level := strings.TrimSpace(cfg.LogLevel); level != "" {
-		if parsed := hclog.LevelFromString(level); parsed != hclog.NoLevel {
-			logger.SetLevel(parsed)
+	normalizedLogging := NormalizeLoggingConfig(cfg.Logging, cfg.LogLevel)
+
+	if logger == nil {
+		lvl := hclog.LevelFromString(normalizedLogging.Level)
+		if lvl == hclog.NoLevel {
+			lvl = hclog.Info
 		}
+		logger = hclog.New(&hclog.LoggerOptions{
+			Name:       "porter",
+			Level:      lvl,
+			JSONFormat: normalizedLogging.IsJSON(),
+		})
 	}
+
+	if !normalizedLogging.LevelValid && strings.TrimSpace(cfg.Logging.Level) != "" {
+		logger.Warn("Received unknown log level from DS", "level", cfg.Logging.Level)
+	}
+	if !normalizedLogging.FormatValid && strings.TrimSpace(cfg.Logging.Format) != "" {
+		logger.Warn("Received unknown log format from DS", "format", cfg.Logging.Format)
+	}
+
+	ApplyLogLevel(logger, normalizedLogging)
+
+	cfg.LogLevel = normalizedLogging.Level
+	cfg.Logging.Level = normalizedLogging.Level
+	cfg.Logging.Format = normalizedLogging.Format
+	cfg.Logging.Output = normalizedLogging.Output
 
 	// Ensure cache directory exists
 	if err := os.MkdirAll(cfg.CacheDir, 0755); err != nil {
