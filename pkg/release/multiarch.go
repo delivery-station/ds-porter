@@ -1,11 +1,14 @@
 package release
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,6 +181,8 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 		return fmt.Errorf("failed to load manifest: %w", err)
 	}
 
+	manifestDir := filepath.Dir(p.config.ManifestPath)
+
 	// Push artifacts
 	entries := make(map[Platform]ManifestEntry)
 	for _, entry := range manifest.Manifests {
@@ -186,11 +191,20 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 			return fmt.Errorf("invalid platform %s: %w", entry.Platform, err)
 		}
 
-		if entry.Path == "" {
+		if strings.TrimSpace(entry.Path) == "" {
 			return fmt.Errorf("path required for platform %s", entry.Platform)
 		}
 
-		entries[platform] = entry
+		resolvedEntry := entry
+		if !filepath.IsAbs(resolvedEntry.Path) {
+			resolvedEntry.Path = filepath.Join(manifestDir, resolvedEntry.Path)
+		}
+
+		if strings.TrimSpace(resolvedEntry.MediaType) == "" {
+			resolvedEntry.MediaType = MediaTypeArtifactBinary
+		}
+
+		entries[platform] = resolvedEntry
 	}
 
 	if err := writeProgressLine(progress, "Pushing artifacts to OCI registry..."); err != nil {
@@ -251,6 +265,27 @@ func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry
 func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry ManifestEntry) (ocispec.Descriptor, error) {
 	binaryPath := entry.Path
 
+	info, err := os.Stat(binaryPath)
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("failed to stat %s: %w", binaryPath, err)
+	}
+
+	var cleanup func()
+	if info.IsDir() {
+		archivePath, archiveCleanup, archiveErr := archiveDirectory(binaryPath)
+		if archiveErr != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("failed to archive directory %s: %w", binaryPath, archiveErr)
+		}
+		cleanup = archiveCleanup
+		binaryPath = archivePath
+		if strings.TrimSpace(entry.MediaType) == "" {
+			entry.MediaType = MediaTypeArtifactArchive
+		}
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	// Create hybrid store
 	store := NewFileStore()
 
@@ -276,14 +311,19 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	}
 
 	// Add annotations to manifest
-	manifestDesc.Annotations = map[string]string{
+	annotations := map[string]string{
 		ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
-		"os":                      platform.OS,
-		"architecture":            platform.Arch,
 	}
-	if platform.Variant != "" {
-		manifestDesc.Annotations["variant"] = platform.Variant
+	if strings.TrimSpace(platform.OS) != "" {
+		annotations["os"] = platform.OS
 	}
+	if strings.TrimSpace(platform.Arch) != "" {
+		annotations["architecture"] = platform.Arch
+	}
+	if strings.TrimSpace(platform.Variant) != "" {
+		annotations["variant"] = platform.Variant
+	}
+	manifestDesc.Annotations = annotations
 
 	// Push to remote registry by digest
 	// We use the base reference (repo) and push the manifest by digest
@@ -337,10 +377,14 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec
 
 	for platform, desc := range descriptors {
 		// Add platform info to descriptor
-		desc.Platform = &ocispec.Platform{
-			OS:           platform.OS,
-			Architecture: platform.Arch,
-			Variant:      platform.Variant,
+		if platform.OS == "" && platform.Arch == "" && platform.Variant == "" {
+			desc.Platform = nil
+		} else {
+			desc.Platform = &ocispec.Platform{
+				OS:           platform.OS,
+				Architecture: platform.Arch,
+				Variant:      platform.Variant,
+			}
 		}
 		layers = append(layers, desc)
 	}
@@ -382,6 +426,9 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec
 		MediaType: index.MediaType,
 		Digest:    digest.FromBytes(indexBytes),
 		Size:      int64(len(indexBytes)),
+	}
+	if manifest != nil && len(manifest.Annotations) > 0 {
+		indexDesc.Annotations = manifest.Annotations
 	}
 	if err := store.Push(ctx, indexDesc, bytes.NewReader(indexBytes)); err != nil {
 		return "", fmt.Errorf("failed to add index to store: %w", err)
@@ -545,4 +592,103 @@ func (s *FileStore) AddFile(path string, mediaType string) (ocispec.Descriptor, 
 		desc: desc,
 	}
 	return desc, nil
+}
+
+func archiveDirectory(dir string) (string, func(), error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	if !info.IsDir() {
+		return "", nil, fmt.Errorf("path %s is not a directory", dir)
+	}
+
+	archiveFile, err := os.CreateTemp("", "ds-porter-archive-*.tar.gz")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary archive: %w", err)
+	}
+
+	gzipWriter := gzip.NewWriter(archiveFile)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = tarWriter.Close()
+		_ = gzipWriter.Close()
+		_ = archiveFile.Close()
+		_ = os.Remove(archiveFile.Name())
+		return "", nil, fmt.Errorf("failed to resolve directory %s: %w", dir, err)
+	}
+
+	walkErr := filepath.WalkDir(dirAbs, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		relPath, relErr := filepath.Rel(dirAbs, path)
+		if relErr != nil {
+			return relErr
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+
+		header, headerErr := tar.FileInfoHeader(info, "")
+		if headerErr != nil {
+			return headerErr
+		}
+		header.Name = filepath.ToSlash(relPath)
+
+		if d.Type()&os.ModeSymlink != 0 {
+			target, linkErr := os.Readlink(path)
+			if linkErr != nil {
+				return linkErr
+			}
+			header.Linkname = target
+		}
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return openErr
+		}
+		if _, copyErr := io.Copy(tarWriter, file); copyErr != nil {
+			_ = file.Close()
+			return copyErr
+		}
+		return file.Close()
+	})
+
+	firstErr := walkErr
+	if closeErr := tarWriter.Close(); firstErr == nil {
+		firstErr = closeErr
+	}
+	if gzipErr := gzipWriter.Close(); firstErr == nil {
+		firstErr = gzipErr
+	}
+	if closeErr := archiveFile.Close(); firstErr == nil {
+		firstErr = closeErr
+	}
+
+	if firstErr != nil {
+		_ = os.Remove(archiveFile.Name())
+		return "", nil, fmt.Errorf("failed to archive directory %s: %w", dir, firstErr)
+	}
+
+	archivePath := archiveFile.Name()
+	return archivePath, func() {
+		_ = os.Remove(archivePath)
+	}, nil
 }

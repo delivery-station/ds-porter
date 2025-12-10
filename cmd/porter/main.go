@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -65,17 +66,17 @@ func main() {
 	})
 }
 
-func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) error {
+func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdout io.Writer) (*porter.ArtifactResult, error) {
 	for _, arg := range args {
 		if isHelpFlag(arg) {
 			printPullUsage(stdout)
-			return nil
+			return nil, nil
 		}
 	}
 
 	if len(args) < 1 {
 		printPullUsage(stdout)
-		return fmt.Errorf("artifact reference required")
+		return nil, fmt.Errorf("artifact reference required")
 	}
 
 	var ref string
@@ -89,7 +90,7 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 		arg := args[i]
 		if isHelpFlag(arg) {
 			printPullUsage(stdout)
-			return nil
+			return nil, nil
 		} else if arg == "--insecure" {
 			insecure = true
 		} else if arg == "-o" || arg == "--output" {
@@ -97,13 +98,13 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 				output = args[i+1]
 				i++ // skip next arg
 			} else {
-				return fmt.Errorf("output path required for %s", arg)
+				return nil, fmt.Errorf("output path required for %s", arg)
 			}
 		} else if arg == "--all-arch" {
 			allPlatforms = true
 		} else if arg == "--platform" {
 			if i+1 >= len(args) {
-				return fmt.Errorf("platform value required for %s", arg)
+				return nil, fmt.Errorf("platform value required for %s", arg)
 			}
 			platformSelections = append(platformSelections, args[i+1])
 			i++
@@ -117,44 +118,62 @@ func handlePull(client *porter.Client, args []string, logger hclog.Logger, stdou
 	}
 
 	if ref == "" {
-		return fmt.Errorf("artifact reference required")
+		return nil, fmt.Errorf("artifact reference required")
 	}
 
 	if allPlatforms && len(platformSelections) > 0 {
-		return fmt.Errorf("--all-arch cannot be combined with --platform")
+		return nil, fmt.Errorf("--all-arch cannot be combined with --platform")
 	}
 
 	result, err := client.PullArtifact(ref, insecure)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// If output is specified, export the artifact
 	if output != "" {
 		exportOpts, err := buildExportOptions(allPlatforms, platformSelections)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		exportedPaths, err := client.ExportArtifact(result, output, exportOpts)
 		if err != nil {
-			return fmt.Errorf("failed to export artifact: %w", err)
+			return nil, fmt.Errorf("failed to export artifact: %w", err)
 		}
 		result.ExportedFiles = exportedPaths
 		for _, p := range exportedPaths {
 			logger.Info("Artifact exported", "path", p)
 		}
+
+		if len(exportedPaths) > 0 {
+			if finalizerName := firstNonEmpty(result.Metadata, "ds.finalizer", "finalizer"); strings.TrimSpace(finalizerName) != "" {
+				if _, ok := result.Metadata["ds.finalizer.args"]; !ok {
+					resolved := output
+					if abs, err := filepath.Abs(output); err == nil {
+						resolved = abs
+					} else {
+						logger.Warn("Failed to resolve absolute path for finalizer", "path", output, "error", err)
+					}
+
+					if _, err := os.Stat(resolved); err != nil {
+						logger.Warn("Finalizer path does not exist", "path", resolved, "error", err)
+					}
+
+					argsPayload := []string{resolved}
+					encoded, err := json.Marshal(argsPayload)
+					if err != nil {
+						logger.Warn("Failed to encode finalizer arguments", "path", resolved, "error", err)
+						result.Metadata["ds.finalizer.args"] = resolved
+					} else {
+						result.Metadata["ds.finalizer.args"] = string(encoded)
+					}
+				}
+			}
+		}
 	}
 
-	// Output result as JSON for DS to parse
-	jsonOutput, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("failed to marshal result: %w", err)
-	}
-	if _, err := fmt.Fprintln(stdout, string(jsonOutput)); err != nil {
-		return fmt.Errorf("failed to write result: %w", err)
-	}
-	return nil
+	return result, nil
 }
 
 func buildExportOptions(allPlatforms bool, selections []string) (porter.ExportOptions, error) {
@@ -252,14 +271,26 @@ func handlePush(client *porter.Client, args []string, logger hclog.Logger, stdou
 	var positionalArgs []string
 
 	// Parse args
-	for _, arg := range args {
-		if len(arg) > 11 && arg[:11] == "--manifest=" {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--manifest=") {
 			manifestPath = arg[11:]
-		} else if arg == "--insecure" {
-			insecure = true
-		} else {
-			positionalArgs = append(positionalArgs, arg)
+			continue
 		}
+		if arg == "--manifest" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("manifest path required for --manifest")
+			}
+			manifestPath = args[i+1]
+			i++
+			continue
+		}
+		if arg == "--insecure" {
+			insecure = true
+			continue
+		}
+
+		positionalArgs = append(positionalArgs, arg)
 	}
 
 	// Multi-arch push via manifest

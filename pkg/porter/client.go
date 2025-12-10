@@ -294,6 +294,26 @@ func (c *Client) PullArtifact(ref string, insecure bool) (*ArtifactResult, error
 		}
 	}
 
+	if len(metadata) == 0 {
+		if blobAnnotations, err := loadDescriptorAnnotations(finalCachePath, desc); err != nil {
+			c.logger.Debug("Failed to load descriptor annotations", "error", err)
+		} else {
+			for k, v := range blobAnnotations {
+				metadata[k] = v
+			}
+		}
+	}
+
+	if len(metadata) == 0 {
+		if indexAnnotations, err := loadIndexAnnotations(finalCachePath); err != nil {
+			c.logger.Debug("Failed to load index annotations", "error", err)
+		} else {
+			for k, v := range indexAnnotations {
+				metadata[k] = v
+			}
+		}
+	}
+
 	// Check for plugin execution info in metadata
 	var pluginInfo *PluginExecutionInfo
 	if pluginName, ok := metadata["ds.plugin.name"]; ok {
@@ -658,15 +678,12 @@ func createArchiveFromDirectory(dir string) (string, func(), error) {
 func parseManifestPlatform(value string) (release.Platform, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return release.Platform{OS: "noarch"}, nil
+		return release.Platform{}, nil
 	}
 
 	platform, err := release.ParsePlatform(trimmed)
 	if err != nil {
 		return release.Platform{}, fmt.Errorf("invalid platform %q: %w", value, err)
-	}
-	if strings.TrimSpace(platform.OS) == "" {
-		platform.OS = "noarch"
 	}
 	return platform, nil
 }
@@ -974,6 +991,14 @@ func (c *Client) selectManifests(ctx context.Context, store *oci.Store, root oci
 			return nil, fmt.Errorf("no manifests found for requested platform(s)")
 		}
 
+		if len(selections) == 0 {
+			if len(index.Manifests) == 1 {
+				entry := index.Manifests[0]
+				return []manifestSelection{{Descriptor: entry, Platform: entry.Platform}}, nil
+			}
+			return nil, fmt.Errorf("no manifests found in index")
+		}
+
 		return selections, nil
 	}
 
@@ -1035,13 +1060,24 @@ func (c *Client) exportManifestLayers(ctx context.Context, store *oci.Store, man
 
 	var exported []string
 	for _, layer := range manifest.Layers {
-		filename := determineLayerFilename(layer, baseName, platform)
-		destPath := filepath.Join(destDir, filename)
-
 		layerReader, err := store.Fetch(ctx, layer)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch layer: %w", err)
 		}
+
+		if strings.Contains(layer.MediaType, "tar+gzip") {
+			paths, err := extractTarGz(layerReader, destDir)
+			_ = layerReader.Close()
+			if err != nil {
+				return nil, err
+			}
+			exported = append(exported, paths...)
+			c.logger.Info("Extracted archive layer", "digest", layer.Digest, "dir", destDir)
+			continue
+		}
+
+		filename := determineLayerFilename(layer, baseName, platform)
+		destPath := filepath.Join(destDir, filename)
 
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			_ = layerReader.Close()
@@ -1074,6 +1110,70 @@ func (c *Client) exportManifestLayers(ctx context.Context, store *oci.Store, man
 	}
 
 	return exported, nil
+}
+
+func extractTarGz(reader io.Reader, destination string) ([]string, error) {
+	gz, err := gzip.NewReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init gzip reader: %w", err)
+	}
+	defer func() {
+		_ = gz.Close()
+	}()
+
+	tarReader := tar.NewReader(gz)
+	var extracted []string
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read archive entry: %w", err)
+		}
+
+		cleanName := filepath.Clean(header.Name)
+		if strings.HasPrefix(cleanName, "..") {
+			return nil, fmt.Errorf("archive entry %s escapes destination", header.Name)
+		}
+		targetPath := filepath.Join(destination, cleanName)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil {
+				return nil, fmt.Errorf("failed to create directory %s: %w", targetPath, err)
+			}
+			extracted = append(extracted, targetPath)
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return nil, fmt.Errorf("failed to create path for %s: %w", targetPath, err)
+			}
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create file %s: %w", targetPath, err)
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				_ = outFile.Close()
+				return nil, fmt.Errorf("failed to write file %s: %w", targetPath, err)
+			}
+			if err := outFile.Close(); err != nil {
+				return nil, fmt.Errorf("failed to close file %s: %w", targetPath, err)
+			}
+			extracted = append(extracted, targetPath)
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return nil, fmt.Errorf("failed to create path for symlink %s: %w", targetPath, err)
+			}
+			if err := os.Symlink(header.Linkname, targetPath); err != nil {
+				return nil, fmt.Errorf("failed to create symlink %s: %w", targetPath, err)
+			}
+			extracted = append(extracted, targetPath)
+		default:
+			// Ignore other types for now
+		}
+	}
+
+	return extracted, nil
 }
 
 func destinationLooksLikeFile(path string) bool {
@@ -1125,6 +1225,55 @@ func sanitizeFilename(name string) string {
 		return "artifact"
 	}
 	return clean
+}
+
+func loadIndexAnnotations(cachePath string) (map[string]string, error) {
+	indexPath := filepath.Join(cachePath, "index.json")
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var index ocispec.Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		return nil, err
+	}
+
+	annotations := make(map[string]string)
+	for k, v := range index.Annotations {
+		annotations[k] = v
+	}
+	return annotations, nil
+}
+
+func loadDescriptorAnnotations(cachePath string, desc ocispec.Descriptor) (map[string]string, error) {
+	if desc.Digest.String() == "" {
+		return nil, fmt.Errorf("descriptor is empty")
+	}
+
+	blobPath := filepath.Join(cachePath, "blobs", desc.Digest.Algorithm().String(), desc.Digest.Hex())
+	data, err := os.ReadFile(blobPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+
+	if len(payload.Annotations) == 0 {
+		return nil, fmt.Errorf("descriptor contains no annotations")
+	}
+
+	annotations := make(map[string]string, len(payload.Annotations))
+	for k, v := range payload.Annotations {
+		annotations[k] = v
+	}
+
+	return annotations, nil
 }
 
 func deriveArtifactBaseName(ref string) string {

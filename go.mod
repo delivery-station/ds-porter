@@ -3,7 +3,7 @@ module github.com/delivery-station/porter
 go 1.25.4
 
 require (
-	github.com/delivery-station/ds v1.3.0
+	github.com/delivery-station/ds v1.5.0
 	github.com/google/go-containerregistry v0.20.7
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0
@@ -44,5 +44,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.77.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
-	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )

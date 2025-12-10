@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -87,10 +88,22 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 	// Capture stdout
 	var stdoutBuf bytes.Buffer
 	var errExec error
+	finalizers := []types.FinalizerRequest{}
 
 	switch operation {
 	case "pull":
-		errExec = handlePull(client, args, p.logger, &stdoutBuf)
+		var pullResult *porter.ArtifactResult
+		pullResult, errExec = handlePull(client, args, p.logger, &stdoutBuf)
+		if errExec == nil && pullResult != nil {
+			jsonOutput, marshalErr := json.Marshal(pullResult)
+			if marshalErr != nil {
+				errExec = fmt.Errorf("failed to marshal result: %w", marshalErr)
+			} else {
+				stdoutBuf.Write(jsonOutput)
+				stdoutBuf.WriteByte('\n')
+				finalizers = append(finalizers, finalizersFromMetadata(pullResult.Metadata)...)
+			}
+		}
 	case "push":
 		errExec = handlePush(client, args, p.logger, &stdoutBuf)
 	case "list":
@@ -119,8 +132,9 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 	}
 
 	return &types.ExecutionResult{
-		Stdout:   stdoutBuf.String(),
-		ExitCode: 0,
+		Stdout:     stdoutBuf.String(),
+		ExitCode:   0,
+		Finalizers: finalizers,
 	}, nil
 }
 
@@ -140,4 +154,75 @@ func (p *PorterPlugin) GetSchema(ctx context.Context) (*types.PluginSchema, erro
 			},
 		},
 	}, nil
+}
+
+func finalizersFromMetadata(metadata map[string]string) []types.FinalizerRequest {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	name := firstNonEmpty(metadata, "ds.finalizer", "finalizer")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+
+	operation := strings.TrimSpace(firstNonEmpty(metadata, "ds.finalizer.operation", "finalizer.operation"))
+	if operation == "" {
+		operation = "upload"
+	}
+
+	rawArgs := strings.TrimSpace(firstNonEmpty(metadata, "ds.finalizer.args", "finalizer.args"))
+	args := parseFinalizerArgs(rawArgs)
+
+	return []types.FinalizerRequest{{
+		Name:      name,
+		Operation: operation,
+		Args:      args,
+	}}
+}
+
+func firstNonEmpty(metadata map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if val, ok := metadata[k]; ok {
+			if trimmed := strings.TrimSpace(val); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func parseFinalizerArgs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(raw, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			cleaned := make([]string, 0, len(arr))
+			for _, v := range arr {
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					cleaned = append(cleaned, trimmed)
+				}
+			}
+			if len(cleaned) > 0 {
+				return cleaned
+			}
+			return nil
+		}
+	}
+
+	parts := strings.Split(raw, ",")
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
