@@ -8,10 +8,10 @@ import (
 
 func TestParsePlatform(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantOS    string
-		wantArch  string
+		name        string
+		input       string
+		wantOS      string
+		wantArch    string
 		wantVariant string
 	}{
 		{
@@ -31,10 +31,10 @@ func TestParsePlatform(t *testing.T) {
 			wantArch: "amd64",
 		},
 		{
-			name:      "os/arch/variant",
-			input:     "linux/arm64/v8",
-			wantOS:    "linux",
-			wantArch:  "arm64",
+			name:        "os/arch/variant",
+			input:       "linux/arm64/v8",
+			wantOS:      "linux",
+			wantArch:    "arm64",
 			wantVariant: "v8",
 		},
 		{
