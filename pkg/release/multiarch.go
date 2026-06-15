@@ -209,7 +209,7 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 	}
 
 	// Prepare artifact entries
-	entries := make(map[Platform]ManifestEntry)
+	var entries []ManifestEntry
 	for _, entry := range manifest.Manifests {
 		platform, err := ParsePlatform(entry.Platform)
 		if err != nil {
@@ -217,7 +217,7 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 		}
 
 		if strings.TrimSpace(entry.Path) == "" {
-			return fmt.Errorf("path required for platform %s", entry.Platform)
+			return fmt.Errorf("path required for platform %s", platform.FormatString())
 		}
 
 		resolvedEntry := entry
@@ -229,7 +229,7 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 			resolvedEntry.MediaType = MediaTypeArtifactBinary
 		}
 
-		entries[platform] = resolvedEntry
+		entries = append(entries, resolvedEntry)
 	}
 
 	// Push artifacts (Manifests wrapped around Layers)
@@ -261,12 +261,17 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 }
 
 // PushAll pushes all platform binaries and creates a multi-arch manifest
-func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry, progress io.Writer) (map[Platform]ocispec.Descriptor, map[Platform]ocispec.Descriptor, error) {
+func (p *Pusher) PushAll(ctx context.Context, entries []ManifestEntry, progress io.Writer) (map[Platform]ocispec.Descriptor, map[Platform]ocispec.Descriptor, error) {
 	descriptors := make(map[Platform]ocispec.Descriptor)
 	layers := make(map[Platform]ocispec.Descriptor)
 
-	// Push each platform binary
-	for platform, entry := range entries {
+	// Push each entry
+	for _, entry := range entries {
+		platform, err := ParsePlatform(entry.Platform)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid platform %s: %w", entry.Platform, err)
+		}
+
 		if err := writeProgressLine(progress, "Pushing %s/%s...", platform.OS, platform.Arch); err != nil {
 			return nil, nil, err
 		}
