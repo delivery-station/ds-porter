@@ -34,12 +34,24 @@ type Client struct {
 	logger hclog.Logger
 }
 
+// GetConfig returns the client configuration
+func (c *Client) GetConfig() *Config {
+	return c.config
+}
+
 // Config holds Porter plugin configuration provided by DS
 type Config struct {
 	Registries []RegistryConfig    `json:"registries"`
 	CacheDir   string              `json:"cache_dir"`
 	LogLevel   string              `json:"log_level"`
 	Logging    types.LoggingConfig `json:"logging"`
+	Signing    SigningConfig       `json:"signing"`
+}
+
+// SigningConfig contains settings for signing artifacts
+type SigningConfig struct {
+	Enabled    bool   `json:"enabled"`
+	PrivateKey string `json:"private_key"`
 }
 
 // RegistryConfig holds OCI registry configuration
@@ -150,11 +162,31 @@ func buildConfigFromDS(dsConfig *types.Config) *Config {
 		Output: strings.TrimSpace(dsConfig.Logging.Output),
 	}
 
+	// Extract Signing Config from Plugin Settings
+	var signingConfig SigningConfig
+	if dsConfig.Settings != nil {
+		if porterSettings, ok := dsConfig.Settings["porter"]; ok {
+			if signingRaw, ok := porterSettings["signing"]; ok {
+				// Manually parse map[string]interface{} to SigningConfig
+				if signingMap, ok := signingRaw.(map[string]interface{}); ok {
+					if enabled, ok := signingMap["enabled"].(bool); ok {
+						signingConfig.Enabled = enabled
+					}
+					if privKey, ok := signingMap["private_key"].(string); ok {
+						signingConfig.PrivateKey = privKey
+					}
+				}
+			}
+		}
+	}
+
 	return &Config{
 		Registries: registries,
 		CacheDir:   cacheDir,
-		LogLevel:   logging.Level,
-		Logging:    logging,
+
+		LogLevel: logging.Level,
+		Logging:  logging,
+		Signing:  signingConfig,
 	}
 }
 
@@ -470,6 +502,10 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 		ManifestPath: absPath,
 		TagLatest:    true,
 		Insecure:     insecure,
+		Signing: release.SigningConfig{
+			Enabled:    c.config.Signing.Enabled,
+			PrivateKey: c.config.Signing.PrivateKey,
+		},
 	}
 
 	pusher, err := release.NewPusher(releaseConfig)
@@ -477,7 +513,7 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 		return nil, fmt.Errorf("failed to create pusher: %w", err)
 	}
 
-	descriptors, err := pusher.PushAll(ctx, entries, io.Discard)
+	descriptors, _, err := pusher.PushAll(ctx, entries, io.Discard)
 	if err != nil {
 		return nil, fmt.Errorf("failed to push artifact content: %w", err)
 	}

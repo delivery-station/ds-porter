@@ -2,11 +2,11 @@ artifact-type: application/vnd.delivery-station.plugin.index.v1+json
 annotations:
   name: porter
   version: 0.1.0
-  description: Delivery Station Plugin. Porter is a tool for building, managing, and deploying cloud-native applications using a simple, declarative format.
   url: https://github.com/delivery-station/ds-porter
+  org.opencontainers.image.description: Delivery Station Plugin. Porter is a tool for building, managing, and deploying cloud-native applications using a simple, declarative format.
   org.opencontainers.image.source: https://github.com/delivery-station/ds-porter
+  org.opencontainers.image.licenses: MIT
   vendor: Kharkevich Engineering Lab
-  license: MIT
 manifests:
   - platform: linux/amd64
     path: bin/linux/amd64/ds-porter

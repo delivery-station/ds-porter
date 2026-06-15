@@ -21,6 +21,14 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -46,6 +54,10 @@ const (
 	MediaTypeArtifactBinary  = "application/vnd.delivery-station.artifact.v1+binary"
 	MediaTypeArtifactArchive = "application/vnd.delivery-station.artifact.v1+archive.tar+gzip"
 	MediaTypeArtifactIndex   = "application/vnd.delivery-station.artifact.index.v1+json"
+
+	// New Plugin specific types
+	MediaTypePluginConfig = "application/vnd.delivery-station.plugin.config.v1+json"
+	ArtifactTypePlugin    = "application/vnd.delivery-station.plugin.v1+json"
 )
 
 // LoadManifest reads and parses the manifest file
@@ -110,7 +122,15 @@ type ReleaseConfig struct {
 	Password     string
 	TagLatest    bool
 	ManifestPath string
-	Insecure     bool
+
+	Insecure bool
+	Signing  SigningConfig
+}
+
+// SigningConfig contains settings for signing artifacts
+type SigningConfig struct {
+	Enabled    bool
+	PrivateKey string
 }
 
 // Release orchestrates building and publishing multi-arch artifacts.
@@ -184,6 +204,11 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 	manifestDir := filepath.Dir(p.config.ManifestPath)
 
 	// Push artifacts
+	if err := writeProgressLine(progress, "Pushing artifacts to OCI registry..."); err != nil {
+		return err
+	}
+
+	// Prepare artifact entries
 	entries := make(map[Platform]ManifestEntry)
 	for _, entry := range manifest.Manifests {
 		platform, err := ParsePlatform(entry.Platform)
@@ -207,13 +232,14 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 		entries[platform] = resolvedEntry
 	}
 
-	if err := writeProgressLine(progress, "Pushing artifacts to OCI registry..."); err != nil {
-		return err
-	}
-	descriptors, err := p.PushAll(ctx, entries, progress)
+	// Push artifacts (Manifests wrapped around Layers)
+	descriptors, _, err := p.PushAll(ctx, entries, progress)
 	if err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
+
+	// NOTE: Global SHA256SUMS signing is removed in favor of per-layer signing
+	// The signatures are now embedded in the Layer Annotations within each Manifest.
 
 	// Push Index
 	if err := writeProgressLine(progress, "Pushing manifest index..."); err != nil {
@@ -235,46 +261,48 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 }
 
 // PushAll pushes all platform binaries and creates a multi-arch manifest
-func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry, progress io.Writer) (map[Platform]ocispec.Descriptor, error) {
+func (p *Pusher) PushAll(ctx context.Context, entries map[Platform]ManifestEntry, progress io.Writer) (map[Platform]ocispec.Descriptor, map[Platform]ocispec.Descriptor, error) {
 	descriptors := make(map[Platform]ocispec.Descriptor)
+	layers := make(map[Platform]ocispec.Descriptor)
 
 	// Push each platform binary
 	for platform, entry := range entries {
 		if err := writeProgressLine(progress, "Pushing %s/%s...", platform.OS, platform.Arch); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		desc, err := p.PushBinary(ctx, platform, entry)
+		// We only need the manifest descriptor for the index
+		desc, _, err := p.PushBinary(ctx, platform, entry)
 		if err != nil {
-			return nil, fmt.Errorf("failed to push %s/%s: %w", platform.OS, platform.Arch, err)
+			return nil, nil, fmt.Errorf("failed to push %s/%s: %w", platform.OS, platform.Arch, err)
 		}
 
 		descriptors[platform] = desc
 		if err := writeProgressLine(progress, "✓ Pushed %s → %s", platform.FormatString(), desc.Digest); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if err := writeProgressLine(progress, "✓ All platform binaries pushed successfully"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return descriptors, nil
+	return descriptors, layers, nil
 }
 
 // PushBinary pushes a single platform binary to the registry
-func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry ManifestEntry) (ocispec.Descriptor, error) {
+func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry ManifestEntry) (ocispec.Descriptor, ocispec.Descriptor, error) {
 	binaryPath := entry.Path
 
 	info, err := os.Stat(binaryPath)
 	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("failed to stat %s: %w", binaryPath, err)
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to stat %s: %w", binaryPath, err)
 	}
 
 	var cleanup func()
 	if info.IsDir() {
 		archivePath, archiveCleanup, archiveErr := archiveDirectory(binaryPath)
 		if archiveErr != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("failed to archive directory %s: %w", binaryPath, archiveErr)
+			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to archive directory %s: %w", binaryPath, archiveErr)
 		}
 		cleanup = archiveCleanup
 		binaryPath = archivePath
@@ -296,21 +324,10 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	}
 	binaryDesc, err := store.AddFile(binaryPath, layerMediaType)
 	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("failed to add binary to store: %w", err)
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to add binary to store: %w", err)
 	}
 
-	// Create artifact manifest
-	artifactType := layerMediaType
-	opts := oras.PackManifestOptions{
-		Layers: []ocispec.Descriptor{binaryDesc},
-	}
-
-	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1, artifactType, opts)
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("failed to pack manifest: %w", err)
-	}
-
-	// Add annotations to manifest
+	// Add annotations to binary descriptor
 	annotations := map[string]string{
 		ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -323,10 +340,35 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	if strings.TrimSpace(platform.Variant) != "" {
 		annotations["variant"] = platform.Variant
 	}
-	manifestDesc.Annotations = annotations
+	binaryDesc.Annotations = annotations
 
-	// Push to remote registry by digest
-	// We use the base reference (repo) and push the manifest by digest
+	// Sign binary content if enabled
+	if p.config.Signing.Enabled {
+		// We need to read the content to sign it
+		blobContent, err := store.Fetch(ctx, binaryDesc)
+		if err != nil {
+			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to fetch blob content for signing: %w", err)
+		}
+
+		// Read fully to memory for signing
+		contentBytes, err := io.ReadAll(blobContent)
+		blobContent.Close()
+		if err != nil {
+			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to read blob content for signing: %w", err)
+		}
+
+		signature, keyID, _, err := p.signContent(contentBytes)
+		if err != nil {
+			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to sign blob content: %w", err)
+		}
+
+		// Add signature annotations to the LAYER descriptor
+		binaryDesc.Annotations["delivery-station.io/sha256"] = binaryDesc.Digest.Hex()
+		binaryDesc.Annotations["delivery-station.io/signature"] = base64.StdEncoding.EncodeToString(signature)
+		binaryDesc.Annotations["delivery-station.io/key.id"] = keyID
+	}
+
+	// Push repository
 	baseRef := p.config.Reference
 	if !strings.Contains(baseRef, ":") {
 		baseRef += ":latest"
@@ -337,17 +379,72 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 
 	repo, err := remote.NewRepository(repoName)
 	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("failed to create repository: %w", err)
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to create repository: %w", err)
 	}
 	repo.Client = p.client
 	repo.PlainHTTP = p.config.Insecure
 
-	// Push manifest and blobs
-	if _, err := oras.Copy(ctx, store, manifestDesc.Digest.String(), repo, manifestDesc.Digest.String(), oras.CopyOptions{}); err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("failed to copy to registry: %w", err)
+	// 1. Push Binary Blob
+	blobContent, err := store.Fetch(ctx, binaryDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to fetch blob content: %w", err)
+	}
+	defer blobContent.Close()
+
+	if err := repo.Blobs().Push(ctx, binaryDesc, blobContent); err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to push blob to registry: %w", err)
 	}
 
-	return manifestDesc, nil
+	// 2. Create and Push Config Blob
+	configBytes := []byte("{}")
+	configDesc := ocispec.Descriptor{
+		MediaType: MediaTypePluginConfig, // Custom config media type
+		Digest:    digest.FromBytes(configBytes),
+		Size:      int64(len(configBytes)),
+	}
+	if err := repo.Blobs().Push(ctx, configDesc, bytes.NewReader(configBytes)); err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to push config blob: %w", err)
+	}
+
+	// 3. Create OCI Manifest
+	manifest := ocispec.Manifest{
+		Versioned: specs.Versioned{
+			SchemaVersion: 2,
+		},
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: ArtifactTypePlugin, // Explicit ArtifactType
+		Config:       configDesc,
+		Layers:       []ocispec.Descriptor{binaryDesc},
+		Annotations: map[string]string{
+			ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+
+	// Pack manifest
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	manifestDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromBytes(manifestBytes),
+		Size:      int64(len(manifestBytes)),
+		Platform: &ocispec.Platform{
+			OS:           platform.OS,
+			Architecture: platform.Arch,
+			Variant:      platform.Variant,
+		},
+	}
+
+	// 4. Push Manifest
+	if err := repo.Manifests().Push(ctx, manifestDesc, bytes.NewReader(manifestBytes)); err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to push manifest: %w", err)
+	}
+
+	// Return the MANIFEST descriptor (standard OCI structure)
+	// We return nil for the second descriptor as we no longer return the layer separately for indexing
+	return manifestDesc, ocispec.Descriptor{}, nil
 }
 
 // PushIndex creates and pushes the multi-arch manifest index
@@ -691,4 +788,83 @@ func archiveDirectory(dir string) (string, func(), error) {
 	return archivePath, func() {
 		_ = os.Remove(archivePath)
 	}, nil
+}
+
+func (p *Pusher) signContent(content []byte) ([]byte, string, string, error) {
+	if p.config.Signing.PrivateKey == "" {
+		return nil, "", "", fmt.Errorf("private key is required for signing")
+	}
+
+	// Parse private key
+	// Support both raw PEM content and file path
+	var keyBytes []byte
+	if strings.Contains(p.config.Signing.PrivateKey, "BEGIN RSA PRIVATE KEY") || strings.Contains(p.config.Signing.PrivateKey, "BEGIN PRIVATE KEY") {
+		keyBytes = []byte(p.config.Signing.PrivateKey)
+	} else {
+		// Try to read from file
+		var err error
+		keyBytes, err = os.ReadFile(p.config.Signing.PrivateKey)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("failed to read private key file: %w", err)
+		}
+	}
+
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		return nil, "", "", fmt.Errorf("failed to decode PEM block containing private key")
+	}
+
+	var privKey *rsa.PrivateKey
+	var err error
+
+	if block.Type == "RSA PRIVATE KEY" {
+		privKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	} else {
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err == nil {
+			var ok bool
+			privKey, ok = key.(*rsa.PrivateKey)
+			if !ok {
+				return nil, "", "", fmt.Errorf("private key must be RSA")
+			}
+		}
+	}
+
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	// Calculate hash of content
+	hashed := sha256.Sum256(content)
+
+	// Sign
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed[:])
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to sign content: %w", err)
+	}
+
+	// Generate Public Key Metadata
+	pubKey := privKey.Public()
+	rsaPubKey, ok := pubKey.(*rsa.PublicKey)
+	if !ok {
+		return nil, "", "", fmt.Errorf("public key is not RSA")
+	}
+
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(rsaPubKey)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	// Calculate Key ID (SHA256 fingerprint of PKIX bytes)
+	keyHash := sha256.Sum256(pubKeyBytes)
+	keyID := fmt.Sprintf("%x", keyHash)
+
+	// ASCII Armor
+	pubKeyBlock := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubKeyBytes,
+	}
+	asciiArmor := string(pem.EncodeToMemory(pubKeyBlock))
+
+	return signature, keyID, asciiArmor, nil
 }

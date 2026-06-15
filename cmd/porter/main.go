@@ -278,16 +278,16 @@ func writeLines(w io.Writer, lines []string) {
 
 func handleMultiArchPush(client *porter.Client, ref, manifestPath string, logger hclog.Logger, stdout io.Writer, insecure bool) error {
 	// Parse registry and repository from ref
-	// ref format: registry/repo[:tag]
-	// We need to split this for ReleaseConfig
-	// Actually, let's just pass the full ref and let the pusher handle it
-
 	parsedRef, err := name.ParseReference(ref)
 	if err != nil {
 		return fmt.Errorf("invalid reference %q: %w", ref, err)
 	}
 
 	username, password := client.ResolveCredentials(parsedRef.Context().RegistryStr())
+
+	// Resolve signing configuration from Plugin Configuration (from config.yaml)
+	signingEnabled := client.GetConfig().Signing.Enabled
+	privateKey := client.GetConfig().Signing.PrivateKey
 
 	// Config
 	config := release.ReleaseConfig{
@@ -297,6 +297,10 @@ func handleMultiArchPush(client *porter.Client, ref, manifestPath string, logger
 		ManifestPath: manifestPath,
 		TagLatest:    true, // Default to true
 		Insecure:     insecure,
+		Signing: release.SigningConfig{
+			Enabled:    signingEnabled,
+			PrivateKey: privateKey,
+		},
 	}
 
 	pusher, err := release.NewPusher(config)

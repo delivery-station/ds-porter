@@ -45,6 +45,7 @@ func (p *PorterPlugin) GetManifest(ctx context.Context) (*types.PluginInfo, erro
 			{Name: "list", Description: "List cached artifacts"},
 			{Name: "execute-plugin", Description: "Execute a plugin contained in an artifact"},
 			{Name: "version", Description: "Display plugin version information"},
+			{Name: "config", Description: "Display plugin configuration"},
 		},
 		Platform: types.PluginPlatform{
 			OS:   []string{"linux", "darwin", "windows"},
@@ -124,12 +125,26 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
 		errExec = handleList(client, parsedArgs, p.logger, &stdoutBuf)
 	case "execute-plugin":
 		errExec = handleExecutePlugin(client, parsedArgs, p.logger, &stdoutBuf)
+	case "config":
+		subcommand, _ := parsedArgs.FirstAny("arg0")
+		if subcommand == "show" {
+			jsonOutput, marshalErr := json.MarshalIndent(client.GetConfig(), "", "  ")
+			if marshalErr != nil {
+				errExec = fmt.Errorf("failed to marshal configuration: %w", marshalErr)
+			} else {
+				stdoutBuf.Write(jsonOutput)
+				stdoutBuf.WriteByte('\n')
+			}
+		} else {
+			errExec = fmt.Errorf("usage: ds porter config show")
+		}
 	case "help":
 		stdoutBuf.WriteString(`Available commands:
   pull <artifact>    Pull an artifact
   push <artifact>    Push an artifact
   list               List artifacts
   execute-plugin     Execute a plugin
+  config show        Show plugin configuration
   version            Show plugin version
 `)
 	case "version":
