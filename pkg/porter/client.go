@@ -162,23 +162,9 @@ func buildConfigFromDS(dsConfig *types.Config) *Config {
 		Output: strings.TrimSpace(dsConfig.Logging.Output),
 	}
 
-	// Extract Signing Config from Plugin Settings
+	// Initialize Signing Config with defaults
+	// (actual signing config is set via porter ds.manifest.yaml)
 	var signingConfig SigningConfig
-	if dsConfig.Settings != nil {
-		if porterSettings, ok := dsConfig.Settings["porter"]; ok {
-			if signingRaw, ok := porterSettings["signing"]; ok {
-				// Manually parse map[string]interface{} to SigningConfig
-				if signingMap, ok := signingRaw.(map[string]interface{}); ok {
-					if enabled, ok := signingMap["enabled"].(bool); ok {
-						signingConfig.Enabled = enabled
-					}
-					if privKey, ok := signingMap["private_key"].(string); ok {
-						signingConfig.PrivateKey = privKey
-					}
-				}
-			}
-		}
-	}
 
 	return &Config{
 		Registries: registries,
@@ -462,7 +448,7 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 		return nil, fmt.Errorf("manifest must contain at least one entry")
 	}
 
-	entries := make(map[release.Platform]release.ManifestEntry, len(manifest.Manifests))
+	entries := make([]release.ManifestEntry, 0, len(manifest.Manifests))
 	var cleanups []func()
 	defer func() {
 		for _, fn := range cleanups {
@@ -473,14 +459,14 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 	}()
 
 	for _, entry := range manifest.Manifests {
-		prepared, platform, cleanup, prepErr := prepareManifestEntry(entry, manifestDir)
+		prepared, _, cleanup, prepErr := prepareManifestEntry(entry, manifestDir)
 		if prepErr != nil {
 			return nil, prepErr
 		}
 		if cleanup != nil {
 			cleanups = append(cleanups, cleanup)
 		}
-		entries[platform] = prepared
+		entries = append(entries, prepared)
 	}
 
 	ctx := context.Background()
