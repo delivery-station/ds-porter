@@ -357,7 +357,9 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 
 		// Read fully to memory for signing
 		contentBytes, err := io.ReadAll(blobContent)
-		blobContent.Close()
+		if err := blobContent.Close(); err != nil {
+			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to close blob content: %w", err)
+		}
 		if err != nil {
 			return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to read blob content for signing: %w", err)
 		}
@@ -394,7 +396,7 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	if err != nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to fetch blob content: %w", err)
 	}
-	defer blobContent.Close()
+	defer func() { _ = blobContent.Close() }()
 
 	if err := repo.Blobs().Push(ctx, binaryDesc, blobContent); err != nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, fmt.Errorf("failed to push blob to registry: %w", err)
