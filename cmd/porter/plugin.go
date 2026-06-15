@@ -148,7 +148,7 @@ func (p *PorterPlugin) Execute(ctx context.Context, operation string, args []str
   version            Show plugin version
 `)
 	case "version":
-		stdoutBuf.WriteString(fmt.Sprintf("porter version %s\n  commit: %s\n  built:  %s", p.version, p.commit, p.date))
+		fmt.Fprintf(&stdoutBuf, "porter version %s\n  commit: %s\n  built:  %s", p.version, p.commit, p.date)
 	default:
 		errExec = fmt.Errorf("unknown operation: %s", operation)
 	}
