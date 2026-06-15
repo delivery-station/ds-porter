@@ -261,9 +261,9 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 }
 
 // PushAll pushes all platform binaries and creates a multi-arch manifest
-func (p *Pusher) PushAll(ctx context.Context, entries []ManifestEntry, progress io.Writer) (map[Platform]ocispec.Descriptor, map[Platform]ocispec.Descriptor, error) {
-	descriptors := make(map[Platform]ocispec.Descriptor)
-	layers := make(map[Platform]ocispec.Descriptor)
+func (p *Pusher) PushAll(ctx context.Context, entries []ManifestEntry, progress io.Writer) ([]ocispec.Descriptor, []ocispec.Descriptor, error) {
+	descriptors := make([]ocispec.Descriptor, 0, len(entries))
+	layers := make([]ocispec.Descriptor, 0, len(entries))
 
 	// Push each entry
 	for _, entry := range entries {
@@ -282,7 +282,8 @@ func (p *Pusher) PushAll(ctx context.Context, entries []ManifestEntry, progress 
 			return nil, nil, fmt.Errorf("failed to push %s/%s: %w", platform.OS, platform.Arch, err)
 		}
 
-		descriptors[platform] = desc
+		descriptors = append(descriptors, desc)
+		layers = append(layers, desc)
 		if err := writeProgressLine(progress, "✓ Pushed %s → %s", platform.FormatString(), desc.Digest); err != nil {
 			return nil, nil, err
 		}
@@ -455,7 +456,7 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 }
 
 // PushIndex creates and pushes the multi-arch manifest index
-func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec.Descriptor, manifest *Manifest) (string, error) {
+func (p *Pusher) PushIndex(ctx context.Context, descriptors []ocispec.Descriptor, manifest *Manifest) (string, error) {
 	// Create memory store for index
 	store := memory.New()
 
@@ -479,17 +480,9 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors map[Platform]ocispec
 	repo.Client = p.client
 	repo.PlainHTTP = p.config.Insecure
 
-	for platform, desc := range descriptors {
-		// Add platform info to descriptor
-		if platform.OS == "" && platform.Arch == "" && platform.Variant == "" {
-			desc.Platform = nil
-		} else {
-			desc.Platform = &ocispec.Platform{
-				OS:           platform.OS,
-				Architecture: platform.Arch,
-				Variant:      platform.Variant,
-			}
-		}
+	for _, desc := range descriptors {
+		// All descriptors from PushAll have nil Platform (no platform field in manifest)
+		desc.Platform = nil
 		layers = append(layers, desc)
 	}
 
