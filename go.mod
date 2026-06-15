@@ -3,7 +3,7 @@ module github.com/delivery-station/porter
 go 1.25.4
 
 require (
-	github.com/delivery-station/ds v1.6.0
+	github.com/delivery-station/ds v1.6.2
 	github.com/google/go-containerregistry v0.20.7
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0
