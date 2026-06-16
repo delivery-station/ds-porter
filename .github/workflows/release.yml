@@ -24,7 +24,7 @@ jobs:
       - name: Install Delivery Station CLI with Porter plugin
         uses: delivery-station/setup-ds-action@main
         with:
-          plugins: ds-porter@1.4.1
+          plugins: ds-porter@1.4.0
           token: ${{ secrets.GITHUB_TOKEN }}
           config: |
             auth:
