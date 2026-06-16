@@ -44,9 +44,10 @@ type Manifest struct {
 
 // ManifestEntry represents a platform entry in the manifest
 type ManifestEntry struct {
-	Platform  string `yaml:"platform"`
-	MediaType string `yaml:"mediaType"`
-	Path      string `yaml:"path"`
+	Platform    string            `yaml:"platform"`
+	MediaType   string            `yaml:"mediaType"`
+	Path        string            `yaml:"path"`
+	Annotations map[string]string `yaml:"annotations"`
 }
 
 // Delivery Station media types for general artifacts.
@@ -245,7 +246,7 @@ func (p *Pusher) Push(ctx context.Context, progress io.Writer) error {
 	if err := writeProgressLine(progress, "Pushing manifest index..."); err != nil {
 		return err
 	}
-	ref, err := p.PushIndex(ctx, descriptors, manifest)
+	ref, err := p.PushIndex(ctx, descriptors, entries, manifest)
 	if err != nil {
 		return fmt.Errorf("push index failed: %w", err)
 	}
@@ -346,6 +347,14 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 	if strings.TrimSpace(platform.Variant) != "" {
 		annotations["variant"] = platform.Variant
 	}
+
+	// Merge per-entry annotations from manifest (e.g. recipe metadata)
+	if entry.Annotations != nil {
+		for k, v := range entry.Annotations {
+			annotations[k] = v
+		}
+	}
+
 	binaryDesc.Annotations = annotations
 
 	// Sign binary content if enabled
@@ -456,7 +465,7 @@ func (p *Pusher) PushBinary(ctx context.Context, platform Platform, entry Manife
 }
 
 // PushIndex creates and pushes the multi-arch manifest index
-func (p *Pusher) PushIndex(ctx context.Context, descriptors []ocispec.Descriptor, manifest *Manifest) (string, error) {
+func (p *Pusher) PushIndex(ctx context.Context, descriptors []ocispec.Descriptor, entries []ManifestEntry, manifest *Manifest) (string, error) {
 	// Create memory store for index
 	store := memory.New()
 
@@ -480,9 +489,20 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors []ocispec.Descriptor
 	repo.Client = p.client
 	repo.PlainHTTP = p.config.Insecure
 
-	for _, desc := range descriptors {
+	for i, desc := range descriptors {
 		// All descriptors from PushAll have nil Platform (no platform field in manifest)
 		desc.Platform = nil
+
+		// Propagate per-entry annotations to index layer descriptors
+		if entries != nil && i < len(entries) && entries[i].Annotations != nil {
+			if desc.Annotations == nil {
+				desc.Annotations = make(map[string]string)
+			}
+			for k, v := range entries[i].Annotations {
+				desc.Annotations[k] = v
+			}
+		}
+
 		layers = append(layers, desc)
 	}
 

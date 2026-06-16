@@ -504,7 +504,7 @@ func (c *Client) PushArtifact(artifactPath string, ref string, insecure bool) (*
 		return nil, fmt.Errorf("failed to push artifact content: %w", err)
 	}
 
-	refWithTag, err := pusher.PushIndex(ctx, descriptors, manifest)
+	refWithTag, err := pusher.PushIndex(ctx, descriptors, entries, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to push manifest index: %w", err)
 	}

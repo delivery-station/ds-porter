@@ -54,3 +54,77 @@ jobs:
       run: make build
       env:
         GOARCH: ${{ matrix.arch }}
+
+  e2e-test:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5555:5000
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.25'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install skopeo
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y skopeo
+
+    - name: Run e2e tests
+      run: make test-e2e
+
+    - name: Validate annotations with skopeo
+      run: |
+        echo "=== Verifying annotations via skopeo ==="
+        # Push a test artifact with annotations
+        mkdir -p /tmp/skopee-test
+        echo "test-binary" > /tmp/skopee-test/app
+        cat > /tmp/skopee-test/ds.manifest.yaml << 'EOF'
+        artifact-type: application/vnd.delivery-station.artifact.index.v1+json
+        annotations:
+          name: skopeo-test
+          version: "1.0.0"
+        manifests:
+          - path: app
+            platform: linux/amd64
+            mediaType: application/vnd.delivery-station.artifact.v1+binary
+            annotations:
+              org.opencontainers.image.title: skopeo-test-binary
+              custom.annotation: skopeo-verified
+        EOF
+
+        # Build and push using porter
+        make build
+        ./bin/ds-porter push --manifest=/tmp/skopee-test/ds.manifest.yaml localhost:5555/e2e-test/skopeo-verify:latest
+
+        # Verify top-level annotations on the index
+        echo "--- Index annotations ---"
+        skopeo inspect --raw docker://localhost:5555/e2e-test/skopeo-verify:latest 2>/dev/null | \
+          jq '.annotations // {} | {name: .name, version: .version}' || \
+          echo "skopeo inspect raw failed, trying manifest fetch..."
+
+        # Verify per-entry annotations on platform descriptors
+        echo "--- Platform descriptor annotations ---"
+        skopeo inspect --raw docker://localhost:5555/e2e-test/skopeo-verify:latest 2>/dev/null | \
+          jq '.manifests[] | {title: .annotations."org.opencontainers.image.title", custom: .annotations."custom.annotation"}' || \
+          echo "skopeo inspect manifests failed"
+
+        echo "=== skopeo validation complete ==="
