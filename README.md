@@ -58,6 +58,27 @@ Returns cached artifact metadata, including the registry reference and digest us
 ```
 ds porter execute-plugin <artifact-id> <plugin> [args...]
 ```
+
+## Development
+
+### Building
+```bash
+make build          # Build the binary
+make lint           # Run linters (gofmt, govet, golangci-lint)
+make test           # Run unit tests
+```
+
+### Running E2E Tests Locally
+```bash
+make test-e2e       # Runs e2e tests with podman (auto-detects docker if podman unavailable)
+```
+
+The script automatically:
+1. Starts a local OCI registry (`registry:2`) on `localhost:5555`
+2. Runs the e2e test suite
+3. Cleans up the registry container
+
+Requires [podman](https://podman.io/) or [docker](https://www.docker.com/).
 Primarily used by DS; Porter records the request and yields control back to the host for the actual invocation.
 
 ## Configuration

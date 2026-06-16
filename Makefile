@@ -1,4 +1,4 @@
-.PHONY: build test lint clean install run help release-prepare release-build-all release-checksums release-oci-manifest release-oci-push
+.PHONY: build test lint clean install run help release-prepare release-build-all release-checksums release-oci-manifest release-oci-push test-e2e
 
 # Build variables
 BINARY_NAME=ds-porter
@@ -40,7 +40,11 @@ test-integration: ## Run integration tests
 	@echo "Running integration tests..."
 	$(GOTEST) -v -race -tags=integration ./test/integration/...
 
-test-all: ## Run all tests (unit + integration)
+test-e2e: ## Run end-to-end tests (requires running registry on localhost:5555)
+	@echo "Running e2e tests..."
+	@bash scripts/test-e2e.sh
+
+test-all: ## Run all tests (unit + integration + e2e)
 	@echo "Running all tests..."
 	$(GOTEST) -v -race -tags=integration -coverprofile=coverage.out ./...
 

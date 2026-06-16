@@ -284,3 +284,87 @@ func TestPlatformFormatString(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadManifest_PerEntryAnnotations verifies that per-entry annotations
+// from the manifest YAML are correctly parsed and available on ManifestEntry.
+func TestLoadManifest_PerEntryAnnotations(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "ds.manifest.yaml")
+
+	manifestYAML := `
+artifact-type: application/vnd.delivery-station.recipe.index.v1+json
+annotations:
+  name: spark-recipes
+  version: 1.0.1
+manifests:
+  - path: recipes/minimax-m2-awq.yaml
+    mediaType: application/vnd.delivery-station.recipe.v1+yaml
+    annotations:
+      name: MiniMax-M2-AWQ
+      model: QuantTrio/MiniMax-M2-AWQ
+      container: vllm-node
+      solo_only: "false"
+      cluster_only: "true"
+  - path: recipes/nemotron-3-nano-nvfp4.yaml
+    mediaType: application/vnd.delivery-station.recipe.v1+yaml
+    annotations:
+      name: Nemotron-3-Nano-NVFP4
+      model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      container: vllm-node
+      solo_only: "true"
+      cluster_only: "false"
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestYAML), 0644); err != nil {
+		t.Fatalf("failed to write manifest: %v", err)
+	}
+
+	manifest, err := LoadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("LoadManifest() unexpected error: %v", err)
+	}
+
+	if len(manifest.Manifests) != 2 {
+		t.Fatalf("Manifests count = %d, want 2", len(manifest.Manifests))
+	}
+
+	// Verify first entry annotations
+	entry0 := manifest.Manifests[0]
+	if entry0.Annotations == nil {
+		t.Fatal("Manifests[0].Annotations is nil, want annotations map")
+	}
+	if entry0.Annotations["name"] != "MiniMax-M2-AWQ" {
+		t.Errorf("Manifests[0].Annotations[name] = %q, want %q", entry0.Annotations["name"], "MiniMax-M2-AWQ")
+	}
+	if entry0.Annotations["model"] != "QuantTrio/MiniMax-M2-AWQ" {
+		t.Errorf("Manifests[0].Annotations[model] = %q, want %q", entry0.Annotations["model"], "QuantTrio/MiniMax-M2-AWQ")
+	}
+	if entry0.Annotations["container"] != "vllm-node" {
+		t.Errorf("Manifests[0].Annotations[container] = %q, want %q", entry0.Annotations["container"], "vllm-node")
+	}
+	if entry0.Annotations["solo_only"] != "false" {
+		t.Errorf("Manifests[0].Annotations[solo_only] = %q, want %q", entry0.Annotations["solo_only"], "false")
+	}
+	if entry0.Annotations["cluster_only"] != "true" {
+		t.Errorf("Manifests[0].Annotations[cluster_only] = %q, want %q", entry0.Annotations["cluster_only"], "true")
+	}
+
+	// Verify second entry annotations
+	entry1 := manifest.Manifests[1]
+	if entry1.Annotations == nil {
+		t.Fatal("Manifests[1].Annotations is nil, want annotations map")
+	}
+	if entry1.Annotations["name"] != "Nemotron-3-Nano-NVFP4" {
+		t.Errorf("Manifests[1].Annotations[name] = %q, want %q", entry1.Annotations["name"], "Nemotron-3-Nano-NVFP4")
+	}
+	if entry1.Annotations["solo_only"] != "true" {
+		t.Errorf("Manifests[1].Annotations[solo_only] = %q, want %q", entry1.Annotations["solo_only"], "true")
+	}
+
+	// Verify top-level annotations are still present
+	if manifest.Annotations["name"] != "spark-recipes" {
+		t.Errorf("Annotations[name] = %q, want %q", manifest.Annotations["name"], "spark-recipes")
+	}
+	if manifest.Annotations["version"] != "1.0.1" {
+		t.Errorf("Annotations[version] = %q, want %q", manifest.Annotations["version"], "1.0.1")
+	}
+}
