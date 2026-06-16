@@ -31,23 +31,23 @@ func TestPushIndexAnnotationPropagation(t *testing.T) {
 	// Simulate manifest entries with per-entry annotations
 	entries := []ManifestEntry{
 		{
-			Platform: "linux/amd64",
-			Path:     "bin/linux-amd64/app",
+			Platform:  "linux/amd64",
+			Path:      "bin/linux-amd64/app",
 			MediaType: MediaTypeArtifactBinary,
 			Annotations: map[string]string{
-				"org.opencontainers.image.title":           "app-linux-amd64",
-				"org.opencontainers.image.description":    "Linux AMD64 binary",
-				"custom.annotation.entry":                 "entry-value-1",
+				"org.opencontainers.image.title":       "app-linux-amd64",
+				"org.opencontainers.image.description": "Linux AMD64 binary",
+				"custom.annotation.entry":              "entry-value-1",
 			},
 		},
 		{
-			Platform: "darwin/arm64",
-			Path:     "bin/darwin-arm64/app",
+			Platform:  "darwin/arm64",
+			Path:      "bin/darwin-arm64/app",
 			MediaType: MediaTypeArtifactBinary,
 			Annotations: map[string]string{
-				"org.opencontainers.image.title":           "app-darwin-arm64",
-				"org.opencontainers.image.description":    "Darwin ARM64 binary",
-				"custom.annotation.entry":                 "entry-value-2",
+				"org.opencontainers.image.title":       "app-darwin-arm64",
+				"org.opencontainers.image.description": "Darwin ARM64 binary",
+				"custom.annotation.entry":              "entry-value-2",
 			},
 		},
 	}
@@ -98,9 +98,9 @@ func TestPushIndexAnnotationPropagation(t *testing.T) {
 	}
 
 	var verified struct {
-		Manifests []ocispec.Descriptor `json:"manifests"`
-		Annotations map[string]string `json:"annotations,omitempty"`
-		ArtifactType string           `json:"artifactType,omitempty"`
+		Manifests    []ocispec.Descriptor `json:"manifests"`
+		Annotations  map[string]string    `json:"annotations,omitempty"`
+		ArtifactType string               `json:"artifactType,omitempty"`
 	}
 	if err := json.Unmarshal(indexBytes, &verified); err != nil {
 		t.Fatalf("failed to unmarshal index: %v", err)
@@ -119,9 +119,9 @@ func TestPushIndexAnnotationPropagation(t *testing.T) {
 
 	// Verify per-entry annotations on each layer descriptor
 	expectedEntries := []struct {
-		title           string
-		desc            string
-		customEntry     string
+		title       string
+		desc        string
+		customEntry string
 	}{
 		{
 			title:       "app-linux-amd64",
@@ -198,11 +198,11 @@ func TestPushIndexAnnotationPropagation_NoEntryAnnotations(t *testing.T) {
 	}
 
 	index := ocispec.Index{
-		Versioned:      specs.Versioned{SchemaVersion: 2},
-		MediaType:      ocispec.MediaTypeImageIndex,
-		ArtifactType:   manifest.ArtifactType,
-		Manifests:      layers,
-		Annotations:    manifest.Annotations,
+		Versioned:    specs.Versioned{SchemaVersion: 2},
+		MediaType:    ocispec.MediaTypeImageIndex,
+		ArtifactType: manifest.ArtifactType,
+		Manifests:    layers,
+		Annotations:  manifest.Annotations,
 	}
 
 	indexBytes, err := json.Marshal(index)
@@ -211,8 +211,8 @@ func TestPushIndexAnnotationPropagation_NoEntryAnnotations(t *testing.T) {
 	}
 
 	var verified struct {
-		Manifests []ocispec.Descriptor `json:"manifests"`
-		Annotations map[string]string `json:"annotations,omitempty"`
+		Manifests   []ocispec.Descriptor `json:"manifests"`
+		Annotations map[string]string    `json:"annotations,omitempty"`
 	}
 	if err := json.Unmarshal(indexBytes, &verified); err != nil {
 		t.Fatalf("failed to unmarshal index: %v", err)
@@ -244,8 +244,8 @@ func TestPushIndexAnnotationPropagation_MixedAnnotations(t *testing.T) {
 
 	entries := []ManifestEntry{
 		{
-			Platform: "linux/amd64",
-			Path:     "bin/a",
+			Platform:    "linux/amd64",
+			Path:        "bin/a",
 			Annotations: map[string]string{"custom": "has-annotations"},
 		},
 		{
@@ -254,8 +254,8 @@ func TestPushIndexAnnotationPropagation_MixedAnnotations(t *testing.T) {
 			// No annotations
 		},
 		{
-			Platform: "darwin/amd64",
-			Path:     "bin/c",
+			Platform:    "darwin/amd64",
+			Path:        "bin/c",
 			Annotations: map[string]string{"custom": "also-has"},
 		},
 	}
