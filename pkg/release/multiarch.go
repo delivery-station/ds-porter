@@ -490,10 +490,9 @@ func (p *Pusher) PushIndex(ctx context.Context, descriptors []ocispec.Descriptor
 	repo.PlainHTTP = p.config.Insecure
 
 	for i, desc := range descriptors {
-		// All descriptors from PushAll have nil Platform (no platform field in manifest)
-		desc.Platform = nil
-
 		// Propagate per-entry annotations to index layer descriptors
+		// Note: desc.Platform is already set by PushBinary and must be preserved
+		// for the OCI index to correctly map platforms to their manifests.
 		if entries != nil && i < len(entries) && entries[i].Annotations != nil {
 			if desc.Annotations == nil {
 				desc.Annotations = make(map[string]string)
